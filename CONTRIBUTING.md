@@ -57,6 +57,30 @@ Never sacrifice architecture for short-term convenience.
 
 ---
 
+# Local Development Infrastructure
+
+Use uv and Python 3.12 for all local development.
+
+```bash
+uv sync --all-groups
+uv run pre-commit install
+```
+
+Run the same quality checks used by CI before opening a pull request.
+
+```bash
+uv run ruff check backend tests
+uv run black --check backend tests
+uv run mypy backend/app
+uv run pytest
+```
+
+Pre-commit runs only fast formatting, linting, and file-hygiene checks. Type
+checking and tests run in CI and should be run locally when preparing a pull
+request.
+
+---
+
 # Branch Naming
 
 Examples

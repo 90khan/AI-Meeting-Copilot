@@ -717,6 +717,165 @@ Technologies should not exceed their intended responsibilities.
 
 ---
 
+# Layer Dependency Rules
+
+The backend follows a dependency direction that protects domain and application
+code from framework and vendor coupling.
+
+```text
+API / Presentation
+        ↓
+Application
+        ↓
+Domain
+
+Infrastructure ──implements──► Domain contracts
+Core / Composition Root ──────► wires all layers
+```
+
+Rules:
+
+* `api` may depend on application services and API dependency providers.
+* `application` may depend on domain types and domain contracts, never concrete
+  infrastructure adapters.
+* `domain` depends only on the Python standard library and domain code.
+* `infrastructure` implements domain contracts and may depend on external SDKs,
+  persistence libraries, or provider APIs.
+* `core` provides configuration, logging, and composition utilities; it contains
+  no business rules.
+* `main` is the composition boundary and is the only place allowed to assemble
+  concrete implementations across layers.
+
+---
+
+# Dependency Rules
+
+The following dependencies are forbidden:
+
+* Domain code importing FastAPI, SQLAlchemy, provider SDKs, or infrastructure
+  implementations.
+* Application services importing concrete database, vector-store, or AI-provider
+  adapters.
+* API routes querying databases or invoking providers directly.
+* Infrastructure adapters containing business decisions.
+* Modules reading environment variables directly instead of using centralized
+  settings.
+
+Tests may compose concrete implementations or substitutes explicitly. Production
+code must receive dependencies through constructors or narrow API dependency
+providers; it must not use a global service locator.
+
+---
+
+# Application Lifecycle
+
+The FastAPI application is created through an application factory. For each
+application instance, the lifecycle is:
+
+```text
+Resolve Settings
+        ↓
+Create Container and configure logging
+        ↓
+Store container on app.state.container
+        ↓
+await container.start()
+        ↓
+Serve requests
+        ↓
+await container.stop()
+```
+
+The asynchronous lifespan boundary owns startup and shutdown. It ensures that
+future managed resources—such as database connections, provider clients, and
+background workers—are started before traffic is served and released during
+shutdown.
+
+---
+
+# Request Flow
+
+HTTP and WebSocket endpoints remain thin adapters around application use cases.
+
+```text
+Client
+        ↓
+FastAPI route
+        ↓
+API dependency provider
+        ↓
+Application command or query service
+        ↓
+Domain contracts and rules
+        ↓
+Infrastructure adapter (when required)
+        ↓
+Response or event
+```
+
+Routes validate transport data and translate responses. They do not contain
+business rules, direct persistence access, or provider-specific calls.
+
+---
+
+# AI Processing Flow
+
+AI processing remains modular and event-oriented so individual stages can be
+replaced without changing business workflows.
+
+```text
+Audio capture
+        ↓
+Voice activity detection
+        ↓
+Speech recognition
+        ↓
+Transcript buffer ──► Persistence
+        ↓
+Language detection and translation
+        ↓
+German simplification
+        ↓
+Context building and RAG retrieval
+        ↓
+Reply coaching, summaries, action items, and vocabulary extraction
+        ↓
+Persistence and UI events
+```
+
+Provider implementations sit behind domain contracts. Stages publish immutable
+events where asynchronous or cross-module coordination is needed.
+
+---
+
+# Naming Conventions
+
+* Packages, modules, functions, and variables use `snake_case`.
+* Classes, protocols, and enums use `PascalCase`.
+* Constants use `UPPER_CASE`.
+* Application service methods use intent-revealing verbs, such as
+  `generate_summary` or `find_active_meeting`.
+* Logger names are module-qualified and derived from `__name__`.
+* Repository and provider contracts use descriptive nouns; concrete adapters
+  identify the technology they integrate with.
+
+---
+
+# Composition Root
+
+`app.core.container.Container` is the lightweight composition root. Its
+constructor receives validated `Settings`, configures logging, and will
+explicitly construct providers, repositories, and application services as their
+interfaces are introduced. It exposes factory methods rather than public
+singleton attributes and has asynchronous `start` and `stop` lifecycle hooks.
+
+`app.main.create_app` creates one container per FastAPI application instance and
+stores it on `app.state.container`. Future FastAPI dependencies must retrieve
+narrow services from that container rather than construct infrastructure inside
+routes. No global container is permitted.
+
+---
+
 # Future Evolution
 
 The architecture is designed to accommodate future capabilities such as

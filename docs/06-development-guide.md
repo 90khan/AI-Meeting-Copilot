@@ -473,14 +473,21 @@ Target values are defined in the System Architecture document.
 
 # Continuous Integration
 
-Every Pull Request should automatically execute
+The Backend CI workflow runs on pushes, pull requests, and manual dispatch. It
+uses uv, Python 3.12, and the locked dependency set.
 
-- formatting
-- linting
-- type checking
-- unit tests
-- integration tests
-- security scan
+Every CI run executes, in order:
+
+```bash
+uv sync --locked --all-groups
+uv run ruff check backend tests
+uv run black --check backend tests
+uv run mypy backend/app
+uv run pytest
+```
+
+Pre-commit is intentionally limited to fast file-hygiene, Ruff, and Black
+checks. Type checking and tests remain CI quality gates.
 
 A Pull Request must not be merged if CI fails.
 

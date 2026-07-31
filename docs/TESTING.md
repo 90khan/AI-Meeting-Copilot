@@ -384,14 +384,19 @@ Fixtures should be deterministic and easy to understand.
 
 # Continuous Integration
 
-Every Pull Request should execute
+Backend CI runs on pushes, pull requests, and manual dispatch using Python 3.12
+and uv. The workflow synchronizes the locked dependency set before running:
 
-* formatting checks
-* linting
-* type checking
-* unit tests
-* integration tests
-* documentation validation (where applicable)
+```bash
+uv run ruff check backend tests
+uv run black --check backend tests
+uv run mypy backend/app
+uv run pytest
+```
+
+The test configuration discovers both repository-level tests and backend tests.
+The bootstrap smoke test establishes a passing collection baseline; future
+features must add focused unit, integration, or end-to-end coverage as needed.
 
 Long-running performance tests may execute on a scheduled basis rather than every commit.
 

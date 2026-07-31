@@ -16,6 +16,11 @@ Detailed records are available in the ADR directory.
 | ADR-008 | SQLAlchemy + Alembic           | Accepted |
 | ADR-009 | Faster-Whisper as default STT  | Accepted |
 | ADR-010 | FAISS as default vector store  | Accepted |
+| ADR-011 | Lightweight custom DI container | Accepted |
+| ADR-012 | Centralized Pydantic settings   | Accepted |
+| ADR-013 | Python standard-library logging | Accepted |
+| ADR-014 | Clean Architecture dependency rules | Accepted |
+| ADR-015 | FastAPI application composition root | Accepted |
 
 ## Decision Process
 
