@@ -2,13 +2,16 @@
 
 from datetime import UTC, datetime
 from typing import Self
+from uuid import uuid4
 
 from app.domain.entities.aggregate_root import AggregateRoot
+from app.domain.entities.transcript_entry import TranscriptEntry
 from app.domain.events import (
     MeetingCreated,
     MeetingEnded,
     MeetingRenamed,
     MeetingStarted,
+    TranscriptAdded,
 )
 from app.domain.exceptions import (
     InvalidStateTransitionError,
@@ -29,6 +32,7 @@ class Meeting(AggregateRoot[MeetingId]):
         self._status = MeetingStatus.DRAFT
         self._started_at: datetime | None = None
         self._ended_at: datetime | None = None
+        self._transcripts: list[TranscriptEntry] = []
 
     @classmethod
     def create(cls, *, meeting_id: MeetingId | None = None, name: str) -> Self:
@@ -63,6 +67,12 @@ class Meeting(AggregateRoot[MeetingId]):
         """Return when the Meeting ended, if it has ended."""
 
         return self._ended_at
+
+    @property
+    def transcripts(self) -> tuple[TranscriptEntry, ...]:
+        """Return an immutable snapshot of the Meeting transcript."""
+
+        return tuple(self._transcripts)
 
     def start(self) -> None:
         """Start a draft Meeting."""
@@ -105,6 +115,30 @@ class Meeting(AggregateRoot[MeetingId]):
                 new_name=self._name,
             )
         )
+
+    def add_transcript(
+        self,
+        speaker: str,
+        text: str,
+        timestamp: datetime,
+    ) -> TranscriptEntry:
+        """Add an immutable transcript entry to a Meeting that has not ended."""
+
+        if self._status is MeetingStatus.ENDED:
+            raise InvalidStateTransitionError(
+                "An ended Meeting cannot receive transcript entries."
+            )
+
+        transcript_entry = TranscriptEntry(uuid4(), speaker, text, timestamp)
+        self._transcripts.append(transcript_entry)
+        self.record_event(
+            TranscriptAdded(
+                aggregate_id=self.id,
+                transcript_id=transcript_entry.id,
+                speaker=transcript_entry.speaker,
+            )
+        )
+        return transcript_entry
 
     @staticmethod
     def _validate_name(name: str) -> str:

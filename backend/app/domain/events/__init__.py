@@ -7,6 +7,7 @@ from app.domain.events.meeting_events import (
     MeetingRenamed,
     MeetingStarted,
 )
+from app.domain.events.transcript_events import TranscriptAdded
 
 __all__ = [
     "DomainEvent",
@@ -14,4 +15,5 @@ __all__ = [
     "MeetingEnded",
     "MeetingRenamed",
     "MeetingStarted",
+    "TranscriptAdded",
 ]

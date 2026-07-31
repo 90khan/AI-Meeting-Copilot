@@ -1,10 +1,10 @@
 """Tests for the Meeting aggregate's core lifecycle."""
 
-from datetime import UTC
+from datetime import UTC, datetime
 
 import pytest
 from app.domain.entities import Meeting
-from app.domain.events import MeetingCreated
+from app.domain.events import MeetingCreated, TranscriptAdded
 from app.domain.exceptions import InvalidStateTransitionError, ValidationError
 from app.domain.value_objects import MeetingId, MeetingStatus
 
@@ -123,3 +123,41 @@ def test_ended_meeting_cannot_be_renamed_or_ended_again() -> None:
         meeting.rename("Customer interview")
     with pytest.raises(InvalidStateTransitionError):
         meeting.end()
+
+
+def test_add_transcript_stores_an_entry_and_records_an_event() -> None:
+    """A transcript entry is owned by the Meeting and emits an event."""
+
+    meeting = Meeting.create(name="Product review")
+    meeting.pull_domain_events()
+
+    transcript = meeting.add_transcript(
+        speaker="Alex",
+        text="Welcome everyone.",
+        timestamp=datetime(2026, 7, 31, tzinfo=UTC),
+    )
+
+    assert meeting.transcripts == (transcript,)
+    assert isinstance(meeting.transcripts, tuple)
+
+    (event,) = meeting.pull_domain_events()
+
+    assert isinstance(event, TranscriptAdded)
+    assert event.aggregate_id == meeting.id
+    assert event.transcript_id == transcript.id
+    assert event.speaker == "Alex"
+
+
+def test_ended_meeting_cannot_receive_transcripts() -> None:
+    """Transcript additions are rejected once a Meeting has ended."""
+
+    meeting = Meeting.create(name="Product review")
+    meeting.start()
+    meeting.end()
+
+    with pytest.raises(InvalidStateTransitionError):
+        meeting.add_transcript(
+            speaker="Alex",
+            text="Welcome everyone.",
+            timestamp=datetime(2026, 7, 31, tzinfo=UTC),
+        )
