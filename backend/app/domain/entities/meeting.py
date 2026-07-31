@@ -4,6 +4,12 @@ from datetime import UTC, datetime
 from typing import Self
 
 from app.domain.entities.aggregate_root import AggregateRoot
+from app.domain.events import (
+    MeetingCreated,
+    MeetingEnded,
+    MeetingRenamed,
+    MeetingStarted,
+)
 from app.domain.exceptions import (
     InvalidStateTransitionError,
     InvariantViolationError,
@@ -28,7 +34,11 @@ class Meeting(AggregateRoot[MeetingId]):
     def create(cls, *, meeting_id: MeetingId | None = None, name: str) -> Self:
         """Create a new draft Meeting, generating an identity when needed."""
 
-        return cls(meeting_id or MeetingId.new(), name)
+        meeting = cls(meeting_id or MeetingId.new(), name)
+        meeting.record_event(
+            MeetingCreated(aggregate_id=meeting.id, meeting_name=meeting.name)
+        )
+        return meeting
 
     @property
     def name(self) -> str:
@@ -61,8 +71,9 @@ class Meeting(AggregateRoot[MeetingId]):
             raise InvalidStateTransitionError("Only a draft Meeting can be started.")
 
         self._status = MeetingStatus.ACTIVE
-        self._started_at = datetime.now(UTC)
-        # A MeetingStarted event will be recorded here once concrete events exist.
+        started_at = datetime.now(UTC)
+        self._started_at = started_at
+        self.record_event(MeetingStarted(aggregate_id=self.id, started_at=started_at))
 
     def end(self) -> None:
         """End an active Meeting."""
@@ -77,7 +88,7 @@ class Meeting(AggregateRoot[MeetingId]):
 
         self._status = MeetingStatus.ENDED
         self._ended_at = ended_at
-        # A MeetingEnded event will be recorded here once concrete events exist.
+        self.record_event(MeetingEnded(aggregate_id=self.id, ended_at=ended_at))
 
     def rename(self, new_name: str) -> None:
         """Rename a Meeting that has not ended."""
@@ -85,8 +96,15 @@ class Meeting(AggregateRoot[MeetingId]):
         if self._status is MeetingStatus.ENDED:
             raise InvalidStateTransitionError("An ended Meeting cannot be renamed.")
 
+        old_name = self._name
         self._name = self._validate_name(new_name)
-        # A MeetingRenamed event will be recorded here once concrete events exist.
+        self.record_event(
+            MeetingRenamed(
+                aggregate_id=self.id,
+                old_name=old_name,
+                new_name=self._name,
+            )
+        )
 
     @staticmethod
     def _validate_name(name: str) -> str:

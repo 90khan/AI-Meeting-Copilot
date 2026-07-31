@@ -4,6 +4,7 @@ from datetime import UTC
 
 import pytest
 from app.domain.entities import Meeting
+from app.domain.events import MeetingCreated
 from app.domain.exceptions import InvalidStateTransitionError, ValidationError
 from app.domain.value_objects import MeetingId, MeetingStatus
 
@@ -18,6 +19,12 @@ def test_create_returns_a_draft_meeting_with_default_state() -> None:
     assert meeting.status is MeetingStatus.DRAFT
     assert meeting.started_at is None
     assert meeting.ended_at is None
+
+    (event,) = meeting.pull_domain_events()
+
+    assert isinstance(event, MeetingCreated)
+    assert event.aggregate_id == meeting.id
+    assert event.meeting_name == "Product review"
 
 
 def test_create_preserves_an_explicit_meeting_id() -> None:
