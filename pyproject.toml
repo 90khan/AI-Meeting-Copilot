@@ -1,0 +1,54 @@
+[project]
+name = "ai-meeting-copilot"
+version = "0.1.0"
+description = "Privacy-first AI meeting copilot."
+requires-python = ">=3.12,<3.13"
+dependencies = []
+
+[dependency-groups]
+prod = []
+test = [
+    "pytest>=8.0",
+]
+dev = [
+    { include-group = "test" },
+    "black>=24.0",
+    "mypy>=1.0",
+    "ruff>=0.8",
+]
+
+[tool.uv]
+default-groups = ["dev"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "ASYNC", "C4", "PIE", "PT", "RUF", "SIM"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["ai_meeting_copilot"]
+
+[tool.black]
+target-version = ["py312"]
+line-length = 88
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+warn_redundant_casts = true
+warn_unused_configs = true
+warn_unused_ignores = true
+show_error_codes = true
+pretty = true
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-ra --strict-config --strict-markers"
+xfail_strict = true
