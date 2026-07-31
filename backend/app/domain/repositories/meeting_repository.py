@@ -5,8 +5,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
-    type Meeting = object
-    type MeetingId = object
+    from app.domain.entities import Meeting
+    from app.domain.value_objects import MeetingId
 
 
 class MeetingRepository(Protocol):

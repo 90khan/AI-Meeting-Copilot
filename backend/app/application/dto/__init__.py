@@ -2,5 +2,6 @@
 
 from app.application.dto.create_meeting_command import CreateMeetingCommand
 from app.application.dto.create_meeting_result import CreateMeetingResult
+from app.application.dto.start_meeting_command import StartMeetingCommand
 
-__all__ = ["CreateMeetingCommand", "CreateMeetingResult"]
+__all__ = ["CreateMeetingCommand", "CreateMeetingResult", "StartMeetingCommand"]
