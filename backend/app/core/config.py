@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     environment: Environment = Environment.DEVELOPMENT
     debug: bool = False
     log_level: str = "INFO"
+    database_url: str = "sqlite+pysqlite:///./data/app.db"
 
 
 @lru_cache(maxsize=1)
