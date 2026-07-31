@@ -1,0 +1,2357 @@
+# AI Meeting Copilot
+
+# System Architecture
+
+Version: 1.0
+
+Status: Draft
+
+---
+
+# 1. Purpose
+
+This document defines the complete technical architecture of AI Meeting Copilot.
+
+It serves as the single source of truth for all engineering decisions.
+
+Every component, service, module and future extension should follow the architecture described in this document.
+
+If implementation conflicts with this document, this document takes precedence.
+
+---
+
+# 2. Architecture Goals
+
+The architecture is designed around the following principles.
+
+- Low latency
+- Modular
+- Privacy First
+- Local First
+- Provider Agnostic
+- Event Driven
+- Extensible
+- Testable
+- AI Native
+
+---
+
+# 3. High Level Overview
+
+The application listens to meeting audio, transforms speech into structured knowledge, enriches it using AI services, and presents only the most relevant information to the user.
+
+The assistant never joins meetings as a participant.
+
+The assistant only observes locally available audio streams.
+
+---
+
+# 4. High Level Components
+
+The system consists of six major layers.
+
+```
++------------------------------------------------------+
+|                  Desktop Application                 |
++------------------------------------------------------+
+|                  Presentation Layer                  |
++------------------------------------------------------+
+|                  Application Layer                   |
++------------------------------------------------------+
+|                     AI Pipeline                      |
++------------------------------------------------------+
+|                Infrastructure Layer                  |
++------------------------------------------------------+
+|             Local / Cloud AI Providers               |
++------------------------------------------------------+
+```
+
+---
+
+# 5. Layer Responsibilities
+
+## Presentation Layer
+
+Responsible for:
+
+- Overlay
+- Settings
+- Notifications
+- History
+- Vocabulary Viewer
+- Meeting Review
+
+Contains no business logic.
+
+---
+
+## Application Layer
+
+Coordinates the workflow.
+
+Responsible for:
+
+- Session Management
+- User Preferences
+- Event Routing
+- Mode Switching
+- State Management
+
+---
+
+## AI Pipeline
+
+Responsible for every intelligent capability.
+
+Modules include:
+
+- Speech Recognition
+- Simplification
+- Translation
+- Question Detection
+- Reply Coach
+- Intent Detection
+- Vocabulary Extraction
+- Meeting Summary
+- Memory
+- RAG
+- Confidence Scoring
+
+---
+
+## Infrastructure Layer
+
+Responsible for:
+
+- Audio Capture
+- Storage
+- Cache
+- Database
+- Logging
+- Metrics
+- Plugin Loading
+
+---
+
+## AI Providers
+
+Should support multiple providers.
+
+Examples:
+
+- OpenAI
+- Anthropic
+- Google Gemini
+- Ollama
+- LM Studio
+- llama.cpp
+
+The application must never depend on a single provider.
+
+---
+
+# 6. Core Design Principles
+
+## Modular Design
+
+Every feature is implemented as an independent service.
+
+Example:
+
+Speech Recognition Service
+
+Question Detection Service
+
+Translation Service
+
+Summary Service
+
+Reply Coach Service
+
+Vocabulary Service
+
+Each service owns exactly one responsibility.
+
+---
+
+## Dependency Direction
+
+Dependencies always point inward.
+
+Presentation
+
+↓
+
+Application
+
+↓
+
+Domain
+
+↓
+
+Infrastructure
+
+Infrastructure never contains business logic.
+
+---
+
+## Communication
+
+Components communicate through events.
+
+Never directly call another service unless absolutely necessary.
+
+Preferred:
+
+Publisher
+
+↓
+
+Event Bus
+
+↓
+
+Subscriber
+
+Instead of:
+
+Service A
+
+↓
+
+Service B
+
+↓
+
+Service C
+
+---
+
+# 7. Runtime Modes
+
+The application supports three runtime modes.
+
+## Assist Mode
+
+Real-time assistance.
+
+Pipeline:
+
+Audio
+
+↓
+
+Speech Recognition
+
+↓
+
+Simplification
+
+↓
+
+Translation
+
+↓
+
+Question Detection
+
+↓
+
+Reply Coach
+
+↓
+
+Overlay
+
+---
+
+## Learning Mode
+
+Pipeline:
+
+Audio
+
+↓
+
+Speech Recognition
+
+↓
+
+Wait
+
+↓
+
+User Attempts Understanding
+
+↓
+
+Reveal Simplification
+
+↓
+
+Reveal Translation
+
+↓
+
+Store Vocabulary
+
+---
+
+## Meeting Review Mode
+
+Meeting Recording
+
+↓
+
+Transcript
+
+↓
+
+Summary
+
+↓
+
+Action Items
+
+↓
+
+Vocabulary
+
+↓
+
+Grammar Feedback
+
+↓
+
+Report
+
+---
+
+# 8. System Boundaries
+
+The system is responsible for:
+
+✓ Audio processing
+
+✓ AI assistance
+
+✓ Meeting summaries
+
+✓ Vocabulary tracking
+
+✓ Translation
+
+✓ Learning support
+
+The system is NOT responsible for:
+
+✗ Sending messages automatically
+
+✗ Speaking for the user
+
+✗ Joining meetings
+
+✗ Acting as a meeting participant
+
+✗ Making decisions
+
+---
+
+# 9. Supported Platforms
+
+Phase 1
+
+- macOS
+
+Phase 2
+
+- Windows
+
+Phase 3
+
+- Linux
+
+---
+
+# 10. Technology Stack
+
+Frontend
+
+- React
+- TypeScript
+- TailwindCSS
+- Tauri
+
+Backend
+
+- Python
+- FastAPI
+
+Speech
+
+- Faster-Whisper
+
+AI
+
+- OpenAI
+- Anthropic
+- Gemini
+- Ollama
+
+Database
+
+- SQLite
+- PostgreSQL (future)
+
+Vector Database
+
+- FAISS
+
+Streaming
+
+- WebSockets
+
+Caching
+
+- Redis (optional)
+
+Containerization
+
+- Docker
+
+---
+
+# 11. Performance Targets
+
+Speech Recognition
+
+<500ms
+
+Translation
+
+<400ms
+
+Simplification
+
+<400ms
+
+Question Detection
+
+<300ms
+
+Reply Suggestion
+
+<800ms
+
+Overlay Update
+
+<100ms
+
+End-to-End Target
+
+<2 seconds
+
+---
+
+# 12. Scalability Goals
+
+Every AI capability must be implemented as an independent pipeline component.
+
+Adding a new AI capability must not require modifying existing services.
+
+Future examples:
+
+- Sentiment Detection
+
+- Presentation Coach
+
+- Pronunciation Coach
+
+- Company Knowledge Search
+
+These should be added simply by registering a new pipeline component.
+
+---
+
+# 13. Audio Capture Architecture
+
+## Overview
+
+The Audio Capture Service is responsible for acquiring audio from the user's environment with minimal latency.
+
+The service is designed as the entry point of the entire AI pipeline.
+
+No business logic exists inside this module.
+
+Its only responsibility is acquiring audio frames and publishing them to the Event Bus.
+
+---
+
+## Design Goals
+
+- Low latency
+- High reliability
+- Platform abstraction
+- Configurable sample rate
+- Configurable channels
+- Noise tolerant
+- Easily replaceable implementation
+
+---
+
+## Supported Audio Sources
+
+Phase 1
+
+- Default microphone
+
+Phase 2
+
+- System audio
+- Loopback audio
+- Virtual audio devices
+
+Phase 3
+
+- Teams
+- Zoom
+- Google Meet
+- Slack Huddles
+
+The implementation must never depend on a specific meeting application.
+
+---
+
+## Audio Format
+
+Default Sample Rate
+
+16 kHz
+
+Channels
+
+Mono
+
+Encoding
+
+PCM
+
+Chunk Size
+
+Approximately 250 milliseconds
+
+---
+
+## Audio Flow
+
+Microphone
+
+↓
+
+Audio Capture Service
+
+↓
+
+Audio Chunk
+
+↓
+
+Event Bus
+
+↓
+
+Speech Recognition
+
+---
+
+## AudioChunk
+
+Every captured chunk contains:
+
+- session_id
+- timestamp
+- sample_rate
+- duration
+- raw_audio
+- source
+- sequence_number
+
+---
+
+# 14. Voice Activity Detection (VAD)
+
+## Purpose
+
+Running Speech-to-Text continuously is computationally expensive.
+
+Voice Activity Detection determines whether someone is actually speaking.
+
+Only speech segments are forwarded.
+
+Silence is discarded.
+
+---
+
+## Responsibilities
+
+Detect
+
+- speech start
+- speech end
+- pauses
+- silence
+
+---
+
+## Configuration
+
+Speech Threshold
+
+Configurable
+
+Minimum Speech Duration
+
+Configurable
+
+Maximum Silence
+
+Configurable
+
+---
+
+## Output
+
+Speech Segment
+
+↓
+
+Event Bus
+
+---
+
+# 15. Speech Recognition Service
+
+## Purpose
+
+Convert speech into text.
+
+The Speech Recognition Service is completely isolated from downstream AI services.
+
+It only performs transcription.
+
+---
+
+## Preferred Engine
+
+Default
+
+Faster Whisper
+
+Alternative Providers
+
+- Whisper.cpp
+- OpenAI Whisper API
+- Azure Whisper
+- Future providers
+
+---
+
+## Streaming Mode
+
+The service should support streaming transcription.
+
+Small transcript updates are preferred over waiting for complete sentences.
+
+Example
+
+```
+Wir
+
+↓
+
+Wir möchten
+
+↓
+
+Wir möchten gerne
+
+↓
+
+Wir möchten gerne verstehen
+
+↓
+
+...
+```
+
+This significantly reduces latency.
+
+---
+
+## Output
+
+Transcript Event
+
+Contains
+
+- transcript_id
+- text
+- confidence
+- language
+- speaker
+- timestamps
+
+---
+
+# 16. Transcript Buffer
+
+## Purpose
+
+Speech Recognition produces fragmented text.
+
+The Transcript Buffer combines fragments into meaningful sentences.
+
+---
+
+## Responsibilities
+
+- merge partial transcripts
+- remove duplicates
+- detect completed sentences
+- preserve timestamps
+
+---
+
+## Example
+
+Incoming
+
+```
+Wir möchten
+
+Wir möchten gerne
+
+Wir möchten gerne verstehen
+
+Wir möchten gerne verstehen wie
+
+Wir möchten gerne verstehen wie Ihr System funktioniert
+```
+
+Output
+
+```
+Wir möchten gerne verstehen wie Ihr System funktioniert.
+```
+
+---
+
+## Buffer Strategy
+
+The buffer should be configurable.
+
+Possible triggers
+
+- silence
+- punctuation
+- timeout
+- speaker change
+
+---
+
+# 17. Context Window Manager
+
+## Purpose
+
+LLMs require context.
+
+The Context Window Manager determines which previous transcript segments should accompany the current request.
+
+---
+
+## Responsibilities
+
+Maintain
+
+- current discussion
+- previous speaker
+- unresolved questions
+- technical terms
+- conversation history
+
+---
+
+## Sliding Window
+
+Instead of sending the entire meeting,
+
+only the most relevant recent context should be used.
+
+Example
+
+Last 5 minutes
+
+or
+
+Last 20 transcript blocks
+
+---
+
+## Context Priorities
+
+Highest
+
+Current speaker
+
+↓
+
+Current topic
+
+↓
+
+Previous question
+
+↓
+
+Previous answer
+
+↓
+
+Meeting history
+
+---
+
+## Context Compression
+
+Older conversations should be summarized before being reused.
+
+Never resend raw transcripts indefinitely.
+
+---
+
+# 18. Event Bus
+
+## Purpose
+
+Every service communicates through events.
+
+Services must never depend directly on each other.
+
+---
+
+## Example
+
+Audio Service
+
+↓
+
+AudioCaptured
+
+↓
+
+Speech Recognition
+
+↓
+
+TranscriptCreated
+
+↓
+
+Question Detection
+
+↓
+
+QuestionDetected
+
+↓
+
+Reply Coach
+
+↓
+
+ReplyGenerated
+
+↓
+
+Overlay Updated
+
+---
+
+## Advantages
+
+- loose coupling
+- scalability
+- testing
+- extensibility
+- easier debugging
+
+---
+
+## Event Naming
+
+Events use past tense.
+
+Examples
+
+AudioCaptured
+
+TranscriptCreated
+
+QuestionDetected
+
+TranslationCompleted
+
+SummaryGenerated
+
+MeetingEnded
+
+VocabularyStored
+
+---
+
+# 19. AI Pipeline
+
+## Overview
+
+The AI Pipeline transforms transcript data into actionable information.
+
+Every AI capability is implemented as an independent processor.
+
+---
+
+## Pipeline
+
+Transcript
+
+↓
+
+Language Detection
+
+↓
+
+Simplification
+
+↓
+
+Translation
+
+↓
+
+Question Detection
+
+↓
+
+Intent Detection
+
+↓
+
+Vocabulary Extraction
+
+↓
+
+Reply Coach
+
+↓
+
+Meeting Memory
+
+↓
+
+Summary
+
+↓
+
+Overlay
+
+---
+
+Each processor receives structured input.
+
+Each processor returns structured output.
+
+Processors never modify each other's data.
+
+---
+
+## Failure Isolation
+
+If Translation fails
+
+↓
+
+Question Detection should continue.
+
+If Reply Coach fails
+
+↓
+
+Meeting Summary should continue.
+
+Every processor should fail independently.
+
+---
+
+# 20. Pipeline Processors
+
+## Simplification Processor
+
+Input
+
+Transcript
+
+Output
+
+Simple German
+
+---
+
+## Translation Processor
+
+Input
+
+Simple German
+
+Output
+
+Turkish
+
+---
+
+## Question Detection Processor
+
+Input
+
+Transcript
+
+Output
+
+Question
+
+Confidence
+
+---
+
+## Intent Detection Processor
+
+Examples
+
+Question
+
+Decision
+
+Action Item
+
+Discussion
+
+Information
+
+Problem
+
+Risk
+
+---
+
+## Vocabulary Processor
+
+Extract
+
+- technical words
+- uncommon words
+- repeated terminology
+- company vocabulary
+
+---
+
+## Reply Coach Processor
+
+Generate
+
+- B2 answer suggestion
+- key talking points
+- useful vocabulary
+
+The Reply Coach must never generate long paragraphs.
+
+Target:
+
+1–2 concise sentences.
+
+---
+
+## Summary Processor
+
+Continuously updates
+
+Meeting Summary
+
+instead of generating everything at the end.
+
+This enables real-time meeting summaries.
+
+
+---
+
+# 21. Overlay UI Architecture
+
+## Purpose
+
+The Overlay UI provides real-time assistance without interrupting the user's workflow.
+
+It should feel lightweight, non-intrusive, and always remain secondary to the meeting itself.
+
+The overlay must never block critical meeting content.
+
+---
+
+## Design Principles
+
+- Always on top (optional)
+- Minimal visual noise
+- Keyboard controllable
+- Mouse optional
+- Resizable
+- Transparent background support
+- Draggable
+- Theme aware
+
+---
+
+## Overlay Panels
+
+The overlay is composed of independent panels.
+
+Each panel can be enabled or disabled.
+
+Panels include:
+
+- Live Transcript
+- Simplified German
+- Turkish Translation
+- Reply Coach
+- Vocabulary
+- Action Items
+- Meeting Timer
+- Confidence Indicator
+
+---
+
+## Panel Independence
+
+Every panel subscribes to events.
+
+Panels never communicate directly.
+
+Example:
+
+Transcript Panel
+
+↓
+
+TranscriptUpdated Event
+
+↓
+
+Panel Refresh
+
+---
+
+Translation Panel
+
+↓
+
+TranslationCompleted Event
+
+↓
+
+Panel Refresh
+
+---
+
+## Layout Modes
+
+Compact Mode
+
+Designed for daily meetings.
+
+Expanded Mode
+
+Shows additional explanations.
+
+Focus Mode
+
+Displays only the most important information.
+
+Learning Mode
+
+Displays progressive hints.
+
+---
+
+# 22. Session Manager
+
+## Purpose
+
+Every meeting is represented as a Session.
+
+The Session Manager owns the lifecycle of a meeting.
+
+---
+
+## Responsibilities
+
+Create Session
+
+Start Session
+
+Pause Session
+
+Resume Session
+
+Stop Session
+
+Archive Session
+
+---
+
+## Session State
+
+Idle
+
+↓
+
+Waiting
+
+↓
+
+Listening
+
+↓
+
+Processing
+
+↓
+
+Completed
+
+↓
+
+Archived
+
+---
+
+## Session Metadata
+
+Every session stores
+
+- Session ID
+- Start Time
+- End Time
+- Meeting Title (optional)
+- Language
+- Participants (optional)
+- Active Mode
+- AI Provider
+- Statistics
+
+---
+
+# 23. Memory Service
+
+## Purpose
+
+Meetings are conversations.
+
+Conversations require memory.
+
+The Memory Service stores contextual information during the meeting.
+
+---
+
+## Short-Term Memory
+
+Contains
+
+- recent transcript
+- active topic
+- current speaker
+- unresolved questions
+- latest action items
+
+Lifetime
+
+Current meeting only.
+
+---
+
+## Long-Term Memory
+
+Contains
+
+- vocabulary history
+- previous meetings
+- recurring terminology
+- user preferences
+- frequently discussed topics
+
+---
+
+## Memory Layers
+
+Working Memory
+
+↓
+
+Conversation Memory
+
+↓
+
+Meeting Memory
+
+↓
+
+Knowledge Memory
+
+---
+
+## Memory Compression
+
+Older information should be summarized automatically.
+
+The system must avoid sending the entire meeting to the LLM repeatedly.
+
+---
+
+# 24. RAG Service
+
+## Purpose
+
+The Retrieval-Augmented Generation (RAG) Service enriches AI responses with relevant knowledge.
+
+---
+
+## Initial Scope
+
+User Documents
+
+Examples
+
+CV
+
+Personal Notes
+
+Technical Notes
+
+Architecture Documents
+
+Project Documentation
+
+---
+
+## Future Scope
+
+Company Documentation
+
+Confluence
+
+SharePoint
+
+Internal Wiki
+
+API Documentation
+
+Runbooks
+
+Meeting Notes
+
+---
+
+## Retrieval Pipeline
+
+Question
+
+↓
+
+Embedding
+
+↓
+
+Vector Search
+
+↓
+
+Ranking
+
+↓
+
+Context Selection
+
+↓
+
+LLM
+
+---
+
+## Design Goals
+
+Independent
+
+Replaceable
+
+Provider Agnostic
+
+Low Latency
+
+---
+
+## Vector Store
+
+Default
+
+FAISS
+
+Future
+
+Qdrant
+
+pgvector
+
+Pinecone
+
+Milvus
+
+---
+
+# 25. Provider Abstraction Layer
+
+## Purpose
+
+The application must never depend on a single LLM provider.
+
+Changing providers should require configuration changes only.
+
+No application code should change.
+
+---
+
+## Supported Providers
+
+OpenAI
+
+Anthropic
+
+Gemini
+
+Ollama
+
+LM Studio
+
+llama.cpp
+
+Future Providers
+
+---
+
+## Common Interface
+
+Every provider implements
+
+Generate()
+
+Stream()
+
+Embeddings()
+
+HealthCheck()
+
+---
+
+## Provider Selection
+
+Selection is configurable.
+
+Example
+
+Settings
+
+↓
+
+Active Provider
+
+↓
+
+OpenAI
+
+No restart required.
+
+---
+
+# 26. Plugin System
+
+## Purpose
+
+Future capabilities should be added as plugins.
+
+Core architecture should remain unchanged.
+
+---
+
+## Plugin Types
+
+AI Plugins
+
+UI Plugins
+
+Storage Plugins
+
+Export Plugins
+
+Language Plugins
+
+Notification Plugins
+
+Analytics Plugins
+
+---
+
+## Example
+
+Grammar Coach
+
+↓
+
+Install Plugin
+
+↓
+
+Appears in Overlay
+
+No code changes required.
+
+---
+
+## Plugin Lifecycle
+
+Load
+
+Initialize
+
+Register Events
+
+Execute
+
+Shutdown
+
+Unload
+
+---
+
+# 27. Configuration System
+
+## Goals
+
+Centralized
+
+Versioned
+
+Typed
+
+Hot Reload
+
+Environment Aware
+
+---
+
+## Configuration Categories
+
+Audio
+
+AI
+
+UI
+
+Language
+
+Privacy
+
+Security
+
+Logging
+
+Meeting
+
+Storage
+
+Plugins
+
+---
+
+## Sources
+
+Environment Variables
+
+Configuration File
+
+Database
+
+Runtime Overrides
+
+---
+
+# 28. Error Recovery
+
+## Philosophy
+
+One failing service must never stop the meeting.
+
+---
+
+## Examples
+
+Translation fails
+
+↓
+
+Meeting continues
+
+---
+
+Reply Coach crashes
+
+↓
+
+Transcript continues
+
+---
+
+Whisper temporarily unavailable
+
+↓
+
+Retry
+
+↓
+
+Fallback
+
+↓
+
+Notify User
+
+---
+
+## Retry Strategy
+
+Immediate Retry
+
+↓
+
+Exponential Backoff
+
+↓
+
+Circuit Breaker
+
+↓
+
+Fallback Provider
+
+---
+
+# 29. Logging & Observability
+
+## Logging Goals
+
+Every important operation should be traceable.
+
+---
+
+## Log Levels
+
+TRACE
+
+DEBUG
+
+INFO
+
+WARNING
+
+ERROR
+
+CRITICAL
+
+---
+
+## Metrics
+
+Speech Latency
+
+Translation Latency
+
+LLM Latency
+
+Tokens
+
+GPU Usage
+
+CPU Usage
+
+Memory Usage
+
+Dropped Audio Frames
+
+Pipeline Failures
+
+---
+
+## Dashboard
+
+Future versions should expose metrics through an internal diagnostics page.
+
+---
+
+# 30. Security Architecture
+
+## Security Principles
+
+Least Privilege
+
+Local First
+
+Explicit Consent
+
+Secure Defaults
+
+---
+
+## Audio Privacy
+
+Audio is processed locally whenever possible.
+
+Cloud processing requires explicit user consent.
+
+---
+
+## Secrets
+
+API Keys
+
+Tokens
+
+Credentials
+
+must never be stored in plain text.
+
+---
+
+## Encryption
+
+Sensitive local data should be encrypted.
+
+---
+
+## User Control
+
+The user can
+
+Delete Sessions
+
+Delete Vocabulary
+
+Delete Memory
+
+Delete Meeting History
+
+Disable Cloud AI
+
+Export Data
+
+---
+
+## GDPR
+
+The architecture should support GDPR compliance.
+
+Including
+
+Right to Access
+
+Right to Delete
+
+Right to Export
+
+Explicit Consent
+
+Data Minimization
+
+---
+---
+
+# 31. Desktop Application Architecture
+
+## Overview
+
+The desktop application is responsible for interacting with the operating system while remaining independent from AI logic.
+
+The desktop layer should contain no business rules.
+
+It is responsible only for:
+
+- Window Management
+- Overlay Rendering
+- Global Shortcuts
+- Audio Permissions
+- System Tray
+- Notifications
+- Auto Updates
+- Native Integrations
+
+---
+
+## Technology
+
+Framework
+
+Tauri
+
+Frontend
+
+React
+
+Backend Communication
+
+HTTP + WebSocket
+
+---
+
+## Why Tauri
+
+Compared to Electron
+
+- Lower memory usage
+- Smaller binary size
+- Better performance
+- Native Rust backend
+- Better security model
+
+---
+
+# 32. Backend Architecture
+
+The backend owns all business logic.
+
+Technology
+
+Python
+
+FastAPI
+
+The backend consists of independent domains.
+
+Example
+
+Speech
+
+Translation
+
+Meeting
+
+Memory
+
+Vocabulary
+
+Summary
+
+Settings
+
+Plugins
+
+Every domain exposes services.
+
+The UI never accesses databases directly.
+
+---
+
+# 33. Frontend Architecture
+
+The frontend is purely presentation.
+
+Responsibilities
+
+Display
+
+User Interaction
+
+Configuration
+
+Meeting Overlay
+
+History
+
+Statistics
+
+Learning Dashboard
+
+No AI logic belongs inside React components.
+
+---
+
+## State Management
+
+Global State
+
+↓
+
+Meeting State
+
+↓
+
+Panel State
+
+↓
+
+Component State
+
+Never duplicate state.
+
+---
+
+# 34. Recommended Folder Structure
+
+```
+ai-meeting-copilot/
+
+docs/
+
+frontend/
+
+backend/
+
+desktop/
+
+shared/
+
+scripts/
+
+docker/
+
+tests/
+
+examples/
+
+assets/
+
+README.md
+```
+
+---
+
+## Backend
+
+```
+backend/
+
+api/
+
+core/
+
+services/
+
+speech/
+
+translation/
+
+simplifier/
+
+question_detection/
+
+reply_coach/
+
+summary/
+
+memory/
+
+rag/
+
+providers/
+
+events/
+
+database/
+
+models/
+
+repositories/
+
+config/
+
+logging/
+
+plugins/
+
+utils/
+
+tests/
+```
+
+---
+
+## Frontend
+
+```
+frontend/
+
+components/
+
+pages/
+
+hooks/
+
+stores/
+
+layouts/
+
+services/
+
+types/
+
+styles/
+
+icons/
+
+assets/
+```
+
+---
+
+# 35. Dependency Rules
+
+Allowed
+
+Presentation
+
+↓
+
+Application
+
+↓
+
+Domain
+
+↓
+
+Infrastructure
+
+Forbidden
+
+Infrastructure
+
+↓
+
+Presentation
+
+Domain
+
+↓
+
+React
+
+Domain
+
+↓
+
+Database Driver
+
+Services communicate only through interfaces.
+
+---
+
+# 36. Service Contracts
+
+Every service exposes a clear interface.
+
+Example
+
+SpeechService
+
+start()
+
+stop()
+
+pause()
+
+resume()
+
+health()
+
+---
+
+TranslationService
+
+translate()
+
+detect_language()
+
+health()
+
+---
+
+ReplyCoach
+
+generate_reply()
+
+generate_keywords()
+
+health()
+
+---
+
+Every service must support health checks.
+
+---
+
+# 37. Architecture Decision Records (ADR)
+
+Every important architectural decision should be documented.
+
+Example
+
+ADR-001
+
+Use Tauri instead of Electron.
+
+Reason
+
+Performance.
+
+Alternatives
+
+Electron
+
+Rejected because of higher resource usage.
+
+---
+
+ADR-002
+
+Use Faster-Whisper.
+
+Reason
+
+Runs locally.
+
+Lower latency.
+
+Offline capable.
+
+---
+
+ADR-003
+
+Provider Abstraction Layer
+
+Reason
+
+Avoid vendor lock-in.
+
+---
+
+ADR-004
+
+Event Bus Architecture
+
+Reason
+
+Loose coupling.
+
+Better scalability.
+
+---
+
+# 38. Scalability Strategy
+
+The system should scale horizontally by adding new processors.
+
+Current
+
+Transcript
+
+↓
+
+Translation
+
+↓
+
+Overlay
+
+Future
+
+Transcript
+
+↓
+
+Translation
+
+↓
+
+Grammar
+
+↓
+
+Sentiment
+
+↓
+
+Presentation Coach
+
+↓
+
+Pronunciation
+
+↓
+
+Knowledge Retrieval
+
+↓
+
+Overlay
+
+No existing processor should require modification.
+
+---
+
+# 39. Performance Strategy
+
+Priority
+
+Responsiveness
+
+↓
+
+Reliability
+
+↓
+
+Accuracy
+
+↓
+
+Features
+
+The user should always receive assistance within approximately two seconds.
+
+Never delay the UI while waiting for perfect AI output.
+
+Streaming responses are preferred.
+
+---
+
+# 40. Future Extension Points
+
+Future modules should plug into the architecture.
+
+Examples
+
+Meeting Recording
+
+Meeting Search
+
+Calendar Integration
+
+Slack
+
+Microsoft Teams Plugin
+
+Zoom Plugin
+
+Google Meet Plugin
+
+Voice Commands
+
+Multi Speaker Detection
+
+Presentation Mode
+
+Interview Mode
+
+Language Coach
+
+Company Knowledge Assistant
+
+Personal Knowledge Base
+
+Offline AI Pack
+
+---
+
+# 41. Architecture Quality Attributes
+
+The architecture is optimized for
+
+Maintainability
+
+Extensibility
+
+Testability
+
+Performance
+
+Privacy
+
+Reliability
+
+Observability
+
+Portability
+
+Developer Experience
+
+---
+
+# 42. Definition of Done
+
+A feature is considered complete only if
+
+✓ follows Project Principles
+
+✓ follows Coding Standards
+
+✓ has tests
+
+✓ has documentation
+
+✓ supports logging
+
+✓ supports configuration
+
+✓ exposes health checks
+
+✓ emits events
+
+✓ handles failures gracefully
+
+✓ has no hidden dependencies
+
+---
+
+# 43. Architecture Summary
+
+AI Meeting Copilot is built around a modular event-driven architecture.
+
+Every capability is implemented as an independent processor.
+
+The system is provider agnostic.
+
+The system is privacy first.
+
+The system is local first.
+
+The system is designed for continuous evolution.
+
+Its primary objective is not replacing human communication.
+
+Its objective is helping multilingual professionals become confident communicators.
+
+This architecture is the foundation for every future implementation.
+
+---
