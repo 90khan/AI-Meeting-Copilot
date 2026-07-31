@@ -1,0 +1,1 @@
+"""Future shared type definitions."""
