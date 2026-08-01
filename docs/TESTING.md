@@ -169,6 +169,22 @@ Validate
 
 Use representative audio samples rather than synthetic data alone.
 
+## Opt-in Local Faster-Whisper Smoke Test
+
+The real local Faster-Whisper smoke test is skipped by default and never runs in
+normal CI. It uses a developer-provided WAV file; do not commit audio or model
+files.
+
+```bash
+AI_MEETING_COPILOT_RUN_LOCAL_AI_TESTS=1 \
+AI_MEETING_COPILOT_TEST_WAV_PATH=/absolute/path/sample.wav \
+AI_MEETING_COPILOT_SPEECH_TO_TEXT_PROVIDER=faster-whisper \
+uv run pytest -m local_ai -v
+```
+
+The first enabled run may download the configured model and can take time on
+CPU.
+
 ---
 
 # Translation Testing

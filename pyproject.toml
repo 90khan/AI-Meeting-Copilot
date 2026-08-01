@@ -60,3 +60,6 @@ python_classes = ["Test*"]
 python_functions = ["test_*"]
 addopts = "-ra --strict-config --strict-markers"
 xfail_strict = true
+markers = [
+    "local_ai: opt-in tests that run local AI inference with developer-provided assets",
+]
