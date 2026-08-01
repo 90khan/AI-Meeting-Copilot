@@ -1,6 +1,6 @@
 """Meeting aggregate root and its core lifecycle."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Self
 from uuid import uuid4
 
@@ -42,6 +42,28 @@ class Meeting(AggregateRoot[MeetingId]):
         meeting.record_event(
             MeetingCreated(aggregate_id=meeting.id, meeting_name=meeting.name)
         )
+        return meeting
+
+    @classmethod
+    def rehydrate(
+        cls,
+        *,
+        meeting_id: MeetingId,
+        name: str,
+        status: MeetingStatus,
+        started_at: datetime | None,
+        ended_at: datetime | None,
+        transcripts: tuple[TranscriptEntry, ...] = (),
+    ) -> Self:
+        """Restore persisted Meeting state without recording domain events."""
+
+        cls._validate_rehydrated_lifecycle(status, started_at, ended_at)
+
+        meeting = cls(meeting_id, name)
+        meeting._status = status
+        meeting._started_at = started_at
+        meeting._ended_at = ended_at
+        meeting._transcripts = list(transcripts)
         return meeting
 
     @property
@@ -148,3 +170,54 @@ class Meeting(AggregateRoot[MeetingId]):
             raise ValidationError("Meeting name must not be blank.")
 
         return name
+
+    @staticmethod
+    def _validate_rehydrated_lifecycle(
+        status: MeetingStatus,
+        started_at: datetime | None,
+        ended_at: datetime | None,
+    ) -> None:
+        """Validate persisted lifecycle state before restoring a Meeting."""
+
+        if not isinstance(status, MeetingStatus):
+            raise ValidationError("Meeting status must be a MeetingStatus value.")
+
+        for timestamp in (started_at, ended_at):
+            if timestamp is not None:
+                Meeting._validate_utc_timestamp(timestamp)
+
+        if status is MeetingStatus.DRAFT:
+            if started_at is not None or ended_at is not None:
+                raise InvariantViolationError(
+                    "A draft Meeting cannot have lifecycle timestamps."
+                )
+            return
+
+        if status is MeetingStatus.ACTIVE:
+            if started_at is None or ended_at is not None:
+                raise InvariantViolationError(
+                    "An active Meeting requires only a start timestamp."
+                )
+            return
+
+        if status is MeetingStatus.ENDED:
+            if started_at is None or ended_at is None:
+                raise InvariantViolationError(
+                    "An ended Meeting requires start and end timestamps."
+                )
+            if ended_at < started_at:
+                raise InvariantViolationError(
+                    "A Meeting cannot end before it has started."
+                )
+            return
+
+        raise ValidationError("Meeting status is not supported.")
+
+    @staticmethod
+    def _validate_utc_timestamp(timestamp: datetime) -> None:
+        """Ensure a persisted timestamp is timezone-aware and uses UTC."""
+
+        if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+            raise ValidationError("Meeting timestamps must be timezone-aware.")
+        if timestamp.utcoffset() != timedelta(0):
+            raise ValidationError("Meeting timestamps must use UTC.")
