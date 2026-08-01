@@ -185,6 +185,20 @@ uv run pytest -m local_ai -v
 The first enabled run may download the configured model and can take time on
 CPU.
 
+## Opt-in Local Ollama Smoke Tests
+
+The local Ollama capability smoke tests are skipped by default and never run in
+normal CI. Ollama must already be running and the configured capability models
+must already be pulled.
+
+```bash
+AI_MEETING_COPILOT_RUN_LOCAL_AI_TESTS=1 \
+uv run pytest -m local_ai -v
+```
+
+These tests may be slow on CPU. They use concise synthetic inputs and do not
+print generated content.
+
 ---
 
 # Translation Testing
