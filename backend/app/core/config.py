@@ -1,8 +1,10 @@
 """Centralized, typed application configuration."""
 
+import math
 from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import urlparse
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -46,6 +48,15 @@ class Settings(BaseSettings):
     faster_whisper_beam_size: int = 5
     faster_whisper_vad_enabled: bool = False
     faster_whisper_download_directory: Path | None = None
+    ollama_base_url: str = "http://127.0.0.1:11434"
+    ollama_translation_model: str = "qwen2.5:3b"
+    ollama_german_simplification_model: str = "qwen2.5:3b"
+    ollama_reply_coaching_model: str = "qwen2.5:3b"
+    ollama_meeting_summarization_model: str = "qwen2.5:3b"
+    ollama_request_timeout_seconds: float = 120.0
+    ollama_temperature: float = 0.1
+    ollama_context_length: int = 8192
+    ollama_keep_alive: str = "5m"
 
     @field_validator(
         "speech_to_text_provider",
@@ -116,6 +127,76 @@ class Settings(BaseSettings):
         if value is None or (isinstance(value, str) and not value.strip()):
             return None
         return Path(value).expanduser().resolve()
+
+    @field_validator("ollama_base_url", mode="before")
+    @classmethod
+    def normalize_ollama_base_url(cls, value: str) -> str:
+        """Normalize and validate the Ollama server base URL."""
+
+        normalized_value = value.strip().rstrip("/")
+        parsed_url = urlparse(normalized_value)
+        if (
+            not normalized_value
+            or parsed_url.scheme not in {"http", "https"}
+            or not parsed_url.netloc
+        ):
+            raise ValueError("Ollama base URL must use http or https.")
+        return normalized_value
+
+    @field_validator(
+        "ollama_translation_model",
+        "ollama_german_simplification_model",
+        "ollama_reply_coaching_model",
+        "ollama_meeting_summarization_model",
+        mode="before",
+    )
+    @classmethod
+    def normalize_ollama_model_name(cls, value: str) -> str:
+        """Trim and validate an Ollama model identifier."""
+
+        normalized_value = value.strip()
+        if not normalized_value:
+            raise ValueError("Ollama model name must not be blank.")
+        return normalized_value
+
+    @field_validator("ollama_request_timeout_seconds")
+    @classmethod
+    def validate_ollama_request_timeout_seconds(cls, value: float) -> float:
+        """Validate the finite positive Ollama request timeout."""
+
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(
+                "Ollama request timeout must be finite and greater than zero."
+            )
+        return value
+
+    @field_validator("ollama_temperature")
+    @classmethod
+    def validate_ollama_temperature(cls, value: float) -> float:
+        """Validate the finite Ollama generation temperature."""
+
+        if not math.isfinite(value) or not 0.0 <= value <= 2.0:
+            raise ValueError("Ollama temperature must be between 0.0 and 2.0.")
+        return value
+
+    @field_validator("ollama_context_length")
+    @classmethod
+    def validate_ollama_context_length(cls, value: int) -> int:
+        """Validate the positive Ollama model context length."""
+
+        if value <= 0:
+            raise ValueError("Ollama context length must be greater than zero.")
+        return value
+
+    @field_validator("ollama_keep_alive", mode="before")
+    @classmethod
+    def normalize_ollama_keep_alive(cls, value: str) -> str:
+        """Trim and validate the Ollama model keep-alive value."""
+
+        normalized_value = value.strip()
+        if not normalized_value:
+            raise ValueError("Ollama keep_alive must not be blank.")
+        return normalized_value
 
 
 @lru_cache(maxsize=1)

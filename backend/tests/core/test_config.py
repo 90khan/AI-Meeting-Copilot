@@ -158,10 +158,112 @@ def test_faster_whisper_download_directory_is_expanded_and_resolved() -> None:
     assert settings.faster_whisper_download_directory.is_absolute()
 
 
+def test_ollama_settings_use_local_defaults() -> None:
+    """Ollama settings default to local deterministic capability models."""
+
+    settings = Settings()
+
+    assert settings.ollama_base_url == "http://127.0.0.1:11434"
+    assert settings.ollama_translation_model == "qwen2.5:3b"
+    assert settings.ollama_german_simplification_model == "qwen2.5:3b"
+    assert settings.ollama_reply_coaching_model == "qwen2.5:3b"
+    assert settings.ollama_meeting_summarization_model == "qwen2.5:3b"
+    assert settings.ollama_request_timeout_seconds == 120.0
+    assert settings.ollama_temperature == 0.1
+    assert settings.ollama_context_length == 8192
+    assert settings.ollama_keep_alive == "5m"
+
+
+def test_ollama_settings_read_prefixed_environment_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ollama settings use the existing application environment prefix."""
+
+    monkeypatch.setenv(
+        "AI_MEETING_COPILOT_OLLAMA_BASE_URL", " http://localhost:11434/ "
+    )
+    monkeypatch.setenv("AI_MEETING_COPILOT_OLLAMA_TRANSLATION_MODEL", " Custom-Model ")
+    monkeypatch.setenv("AI_MEETING_COPILOT_OLLAMA_REQUEST_TIMEOUT_SECONDS", "45")
+
+    settings = Settings()
+
+    assert settings.ollama_base_url == "http://localhost:11434"
+    assert settings.ollama_translation_model == "Custom-Model"
+    assert settings.ollama_request_timeout_seconds == 45.0
+
+
+def test_ollama_base_url_is_trimmed_and_has_its_trailing_slash_removed() -> None:
+    """Ollama base URL normalization is syntactic and network-free."""
+
+    settings = Settings(ollama_base_url=" https://localhost:11434/api/ ")
+
+    assert settings.ollama_base_url == "https://localhost:11434/api"
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    ["", "   ", "ftp://localhost:11434", "localhost:11434"],
+)
+def test_ollama_settings_reject_invalid_base_urls(base_url: str) -> None:
+    """Ollama base URLs require an HTTP or HTTPS scheme and host."""
+
+    with pytest.raises(ValidationError, match="base URL must use http or https"):
+        Settings(ollama_base_url=base_url)
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "ollama_translation_model",
+        "ollama_german_simplification_model",
+        "ollama_reply_coaching_model",
+        "ollama_meeting_summarization_model",
+    ],
+)
+@pytest.mark.parametrize("value", ["", "   "])
+def test_ollama_settings_reject_blank_model_names(field_name: str, value: str) -> None:
+    """Every capability requires a non-blank configured Ollama model."""
+
+    with pytest.raises(ValidationError, match="Ollama model name must not be blank"):
+        Settings(**{field_name: value})
+
+
+@pytest.mark.parametrize("timeout_seconds", [0.0, -1.0, float("inf"), float("nan")])
+def test_ollama_settings_reject_invalid_request_timeout(timeout_seconds: float) -> None:
+    """Ollama request timeout must be finite and positive."""
+
+    with pytest.raises(ValidationError, match="request timeout"):
+        Settings(ollama_request_timeout_seconds=timeout_seconds)
+
+
+@pytest.mark.parametrize("temperature", [-0.1, 2.1, float("inf"), float("nan")])
+def test_ollama_settings_reject_invalid_temperature(temperature: float) -> None:
+    """Ollama temperature must be finite and within the V1 bounds."""
+
+    with pytest.raises(ValidationError, match="temperature"):
+        Settings(ollama_temperature=temperature)
+
+
+@pytest.mark.parametrize("context_length", [0, -1])
+def test_ollama_settings_reject_invalid_context_length(context_length: int) -> None:
+    """Ollama context length must be positive."""
+
+    with pytest.raises(ValidationError, match="context length"):
+        Settings(ollama_context_length=context_length)
+
+
+@pytest.mark.parametrize("keep_alive", ["", "   "])
+def test_ollama_settings_reject_blank_keep_alive(keep_alive: str) -> None:
+    """Ollama keep-alive configuration must not be blank."""
+
+    with pytest.raises(ValidationError, match="keep_alive"):
+        Settings(ollama_keep_alive=keep_alive)
+
+
 def test_settings_remain_immutable() -> None:
-    """Faster-Whisper configuration retains the immutable settings policy."""
+    """Ollama configuration retains the immutable settings policy."""
 
     settings = Settings()
 
     with pytest.raises(ValidationError):
-        settings.faster_whisper_model = "base"  # type: ignore[misc]
+        settings.ollama_base_url = "http://localhost:11434"  # type: ignore[misc]
