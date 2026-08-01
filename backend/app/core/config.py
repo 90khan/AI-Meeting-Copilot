@@ -39,6 +39,13 @@ class Settings(BaseSettings):
     german_simplification_provider: str = "unconfigured"
     reply_coaching_provider: str = "unconfigured"
     meeting_summarization_provider: str = "unconfigured"
+    faster_whisper_model: str = "small"
+    faster_whisper_device: str = "cpu"
+    faster_whisper_compute_type: str = "int8"
+    faster_whisper_cpu_threads: int | None = None
+    faster_whisper_beam_size: int = 5
+    faster_whisper_vad_enabled: bool = False
+    faster_whisper_download_directory: Path | None = None
 
     @field_validator(
         "speech_to_text_provider",
@@ -56,6 +63,59 @@ class Settings(BaseSettings):
         if not normalized_value:
             raise ValueError("Provider name must not be blank.")
         return normalized_value
+
+    @field_validator("faster_whisper_model", mode="before")
+    @classmethod
+    def normalize_faster_whisper_model(cls, value: str) -> str:
+        """Trim and validate a Faster-Whisper model identifier."""
+
+        normalized_value = value.strip()
+        if not normalized_value:
+            raise ValueError("Faster-Whisper model must not be blank.")
+        return normalized_value
+
+    @field_validator(
+        "faster_whisper_device",
+        "faster_whisper_compute_type",
+        mode="before",
+    )
+    @classmethod
+    def normalize_faster_whisper_runtime_value(cls, value: str) -> str:
+        """Normalize and validate a Faster-Whisper runtime value."""
+
+        normalized_value = value.strip().lower()
+        if not normalized_value:
+            raise ValueError("Faster-Whisper runtime value must not be blank.")
+        return normalized_value
+
+    @field_validator("faster_whisper_cpu_threads")
+    @classmethod
+    def validate_faster_whisper_cpu_threads(cls, value: int | None) -> int | None:
+        """Validate the optional Faster-Whisper CPU thread count."""
+
+        if value is not None and value <= 0:
+            raise ValueError("Faster-Whisper CPU threads must be greater than zero.")
+        return value
+
+    @field_validator("faster_whisper_beam_size")
+    @classmethod
+    def validate_faster_whisper_beam_size(cls, value: int) -> int:
+        """Validate the Faster-Whisper beam-search width."""
+
+        if not 1 <= value <= 10:
+            raise ValueError("Faster-Whisper beam size must be between 1 and 10.")
+        return value
+
+    @field_validator("faster_whisper_download_directory", mode="before")
+    @classmethod
+    def normalize_faster_whisper_download_directory(
+        cls, value: Path | str | None
+    ) -> Path | None:
+        """Resolve an optional model download directory without creating it."""
+
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return None
+        return Path(value).expanduser().resolve()
 
 
 @lru_cache(maxsize=1)
