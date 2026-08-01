@@ -27,13 +27,21 @@ class FakeTranslationProvider:
         )
 
 
-def test_missing_provider_registration_raises_provider_unavailable_error() -> None:
-    """Every unresolved AI capability fails at the stable provider boundary."""
+def test_speech_provider_access_before_start_raises_a_lifecycle_error() -> None:
+    """Speech providers are available only during an active container lifecycle."""
+
+    container = Container(Settings(database_url="sqlite+pysqlite:///:memory:"))
+
+    with pytest.raises(RuntimeError, match="has not been started"):
+        container.get_speech_to_text_provider()
+
+
+def test_missing_non_speech_provider_registration_raises_provider_error() -> None:
+    """Unresolved non-lifecycle provider capabilities keep their current behavior."""
 
     container = Container(Settings(database_url="sqlite+pysqlite:///:memory:"))
 
     for resolver in (
-        container.get_speech_to_text_provider,
         container.get_translation_provider,
         container.get_german_simplification_provider,
         container.get_reply_coaching_provider,

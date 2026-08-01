@@ -30,6 +30,10 @@ from app.core.logging import get_logger, setup_logging
 from app.infrastructure.database.engine import create_engine_from_settings
 from app.infrastructure.database.session import create_session_factory
 from app.infrastructure.persistence.sqlalchemy import SQLAlchemyUnitOfWork
+from app.infrastructure.providers.faster_whisper import (
+    FasterWhisperModelManager,
+    FasterWhisperSpeechToTextProvider,
+)
 
 
 class Container:
@@ -52,31 +56,42 @@ class Container:
         self._meeting_summarization_provider_factory: (
             MeetingSummarizationProviderFactory | None
         ) = None
+        self._faster_whisper_model_manager: FasterWhisperModelManager | None = None
+        self._faster_whisper_speech_to_text_provider: SpeechToTextProvider | None = None
+        self._is_started = False
         setup_logging(settings)
 
     async def start(self) -> None:
-        """Create lifecycle-managed persistence resources when needed."""
+        """Create lifecycle-managed persistence and speech-provider resources."""
 
-        if self._engine is not None:
+        if self._is_started:
             return
 
         engine = create_engine_from_settings(self._settings)
         self._engine = engine
         self._session_factory = create_session_factory(engine)
+        try:
+            self._configure_speech_to_text_provider()
+        except Exception:
+            self._dispose_persistence_resources()
+            raise
+
+        self._is_started = True
 
     async def stop(self) -> None:
-        """Dispose lifecycle-managed persistence resources when present."""
+        """Dispose lifecycle-managed persistence and speech-provider resources."""
 
-        engine = self._engine
-        if engine is None:
-            self._session_factory = None
-            return
-
+        model_manager = self._faster_whisper_model_manager
         try:
-            engine.dispose()
+            if model_manager is not None:
+                model_manager.close()
         finally:
-            self._engine = None
-            self._session_factory = None
+            self._faster_whisper_speech_to_text_provider = None
+            self._faster_whisper_model_manager = None
+            try:
+                self._dispose_persistence_resources()
+            finally:
+                self._is_started = False
 
     def get_settings(self) -> Settings:
         """Return the container's immutable application settings."""
@@ -129,7 +144,13 @@ class Container:
         self._meeting_summarization_provider_factory = factory
 
     def get_speech_to_text_provider(self) -> SpeechToTextProvider:
-        """Create a speech-to-text provider from its registered factory."""
+        """Return the active speech-to-text provider for this lifecycle."""
+
+        self._require_started()
+
+        managed_provider = self._faster_whisper_speech_to_text_provider
+        if managed_provider is not None:
+            return managed_provider
 
         factory = self._speech_to_text_provider_factory
         if factory is None:
@@ -208,6 +229,53 @@ class Container:
             raise RuntimeError("Container has not been started.")
 
         return self._session_factory
+
+    def _require_started(self) -> None:
+        """Raise when a lifecycle-owned dependency is resolved while stopped."""
+
+        if not self._is_started:
+            raise RuntimeError("Container has not been started.")
+
+    def _configure_speech_to_text_provider(self) -> None:
+        """Configure the selected local speech provider for this lifecycle."""
+
+        if self._speech_to_text_provider_factory is not None:
+            return
+
+        provider_name = self._settings.speech_to_text_provider
+        if provider_name == "unconfigured":
+            return
+        if provider_name != "faster-whisper":
+            raise ProviderUnavailableError(
+                f"Unsupported speech-to-text provider: {provider_name}."
+            )
+
+        model_manager = FasterWhisperModelManager(
+            model_name=self._settings.faster_whisper_model,
+            device=self._settings.faster_whisper_device,
+            compute_type=self._settings.faster_whisper_compute_type,
+            cpu_threads=self._settings.faster_whisper_cpu_threads,
+            download_directory=self._settings.faster_whisper_download_directory,
+        )
+        self._faster_whisper_model_manager = model_manager
+        self._faster_whisper_speech_to_text_provider = (
+            FasterWhisperSpeechToTextProvider(
+                model_manager=model_manager,
+                beam_size=self._settings.faster_whisper_beam_size,
+                vad_enabled=self._settings.faster_whisper_vad_enabled,
+            )
+        )
+
+    def _dispose_persistence_resources(self) -> None:
+        """Dispose persistence resources without affecting provider registrations."""
+
+        engine = self._engine
+        try:
+            if engine is not None:
+                engine.dispose()
+        finally:
+            self._engine = None
+            self._session_factory = None
 
     def _require_ai_factories_mutable(self) -> None:
         """Reject provider-factory changes while the container is running."""
