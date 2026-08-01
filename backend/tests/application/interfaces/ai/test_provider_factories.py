@@ -1,6 +1,7 @@
 """Tests for AI provider factory contracts."""
 
 from app.application.dto.ai import (
+    AudioFormat,
     AudioInput,
     GermanLevel,
     GermanSimplificationRequest,
@@ -144,7 +145,12 @@ def test_factory_protocols_accept_structural_callables() -> None:
 def test_factory_test_types_use_public_dtos() -> None:
     """Factory test providers depend only on public application contracts."""
 
-    audio = AudioInput(data=b"audio", sample_rate_hz=16_000, channels=1)
+    audio = AudioInput(
+        data=b"audio",
+        sample_rate_hz=16_000,
+        channels=1,
+        audio_format=AudioFormat.WAV,
+    )
 
     assert audio.sample_rate_hz == 16_000
     assert GermanLevel.B1 == "b1"

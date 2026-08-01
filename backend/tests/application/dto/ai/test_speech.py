@@ -4,6 +4,7 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 from app.application.dto.ai import (
+    AudioFormat,
     AudioInput,
     LanguageCode,
     SpeechToTextRequest,
@@ -16,7 +17,19 @@ from app.application.exceptions import ApplicationValidationError
 def make_audio() -> AudioInput:
     """Create valid audio input for tests."""
 
-    return AudioInput(data=b"audio", sample_rate_hz=16_000, channels=1)
+    return AudioInput(
+        data=b"audio",
+        sample_rate_hz=16_000,
+        channels=1,
+        audio_format=AudioFormat.WAV,
+    )
+
+
+def test_audio_format_supports_only_wav_in_v1() -> None:
+    """V1 accepts only the self-describing WAV audio format."""
+
+    assert list(AudioFormat) == [AudioFormat.WAV]
+    assert AudioFormat.WAV.value == "wav"
 
 
 def make_segment(
@@ -50,7 +63,24 @@ def test_audio_input_rejects_malformed_values(
     """Audio input rejects empty data and non-positive capture properties."""
 
     with pytest.raises(ApplicationValidationError):
-        AudioInput(data=data, sample_rate_hz=sample_rate_hz, channels=channels)
+        AudioInput(
+            data=data,
+            sample_rate_hz=sample_rate_hz,
+            channels=channels,
+            audio_format=AudioFormat.WAV,
+        )
+
+
+def test_audio_input_rejects_plain_string_audio_format() -> None:
+    """Audio input requires the typed V1 audio-format enum."""
+
+    with pytest.raises(ApplicationValidationError, match="valid AudioFormat"):
+        AudioInput(
+            data=b"audio",
+            sample_rate_hz=16_000,
+            channels=1,
+            audio_format="wav",  # type: ignore[arg-type]
+        )
 
 
 @pytest.mark.parametrize(

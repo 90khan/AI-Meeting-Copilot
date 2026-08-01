@@ -3,6 +3,7 @@
 import inspect
 
 from app.application.dto.ai import (
+    AudioFormat,
     AudioInput,
     LanguageCode,
     SpeechToTextRequest,
@@ -51,7 +52,12 @@ def test_fake_provider_accepts_a_valid_request() -> None:
     """The fake uses the public request and result DTOs."""
 
     request = SpeechToTextRequest(
-        audio=AudioInput(data=b"audio", sample_rate_hz=16_000, channels=1),
+        audio=AudioInput(
+            data=b"audio",
+            sample_rate_hz=16_000,
+            channels=1,
+            audio_format=AudioFormat.WAV,
+        ),
         language_hint=LanguageCode(value="tr"),
     )
 

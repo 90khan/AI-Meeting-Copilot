@@ -13,6 +13,7 @@ from app.application.dto.ai.simplification import (
     GermanSimplificationResult,
 )
 from app.application.dto.ai.speech import (
+    AudioFormat,
     AudioInput,
     SpeechToTextRequest,
     TranscriptionResult,
@@ -27,6 +28,7 @@ from app.application.dto.ai.translation import TranslationRequest, TranslationRe
 
 __all__ = [
     "ActionItemDraft",
+    "AudioFormat",
     "AudioInput",
     "GermanLevel",
     "GermanSimplificationRequest",

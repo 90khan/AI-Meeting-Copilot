@@ -2,18 +2,30 @@
 
 import math
 from dataclasses import dataclass
+from enum import StrEnum
 
 from app.application.dto.ai.language import LanguageCode
 from app.application.exceptions import ApplicationValidationError
 
 
+class AudioFormat(StrEnum):
+    """Supported self-describing audio formats for V1 speech-to-text input."""
+
+    WAV = "wav"
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AudioInput:
-    """Audio data and its basic capture characteristics."""
+    """Self-describing WAV audio for V1; raw PCM is intentionally unsupported.
+
+    Raw PCM lacks unambiguous encoding, bit-depth, byte-order, and interleaving
+    metadata.
+    """
 
     data: bytes
     sample_rate_hz: int
     channels: int
+    audio_format: AudioFormat
 
     def __post_init__(self) -> None:
         """Validate the audio payload and capture characteristics."""
@@ -27,6 +39,10 @@ class AudioInput:
         if self.channels <= 0:
             raise ApplicationValidationError(
                 "Audio channels must be greater than zero."
+            )
+        if not isinstance(self.audio_format, AudioFormat):
+            raise ApplicationValidationError(
+                "Audio format must be a valid AudioFormat."
             )
 
 
