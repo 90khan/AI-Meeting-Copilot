@@ -4,6 +4,7 @@ from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -33,6 +34,28 @@ class Settings(BaseSettings):
     debug: bool = False
     log_level: str = "INFO"
     database_url: str = "sqlite+pysqlite:///./data/app.db"
+    speech_to_text_provider: str = "unconfigured"
+    translation_provider: str = "unconfigured"
+    german_simplification_provider: str = "unconfigured"
+    reply_coaching_provider: str = "unconfigured"
+    meeting_summarization_provider: str = "unconfigured"
+
+    @field_validator(
+        "speech_to_text_provider",
+        "translation_provider",
+        "german_simplification_provider",
+        "reply_coaching_provider",
+        "meeting_summarization_provider",
+        mode="before",
+    )
+    @classmethod
+    def normalize_provider_name(cls, value: str) -> str:
+        """Normalize and validate a configured provider name."""
+
+        normalized_value = value.strip().lower()
+        if not normalized_value:
+            raise ValueError("Provider name must not be blank.")
+        return normalized_value
 
 
 @lru_cache(maxsize=1)
