@@ -1,7 +1,6 @@
 """Application composition root."""
 
 import logging
-from typing import NoReturn
 
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
@@ -71,24 +70,28 @@ class Container:
         return SQLAlchemyUnitOfWork(self._require_session_factory())
 
     def get_create_meeting_use_case(self) -> CreateMeetingUseCase:
-        """Reject unsafe direct repository wiring for the create use case."""
+        """Create a Unit-of-Work-backed Meeting creation use case."""
 
-        self._raise_direct_repository_wiring_error()
+        self._require_session_factory()
+        return CreateMeetingUseCase(self.get_unit_of_work)
 
     def get_start_meeting_use_case(self) -> StartMeetingUseCase:
-        """Reject unsafe direct repository wiring for the start use case."""
+        """Create a Unit-of-Work-backed Meeting start use case."""
 
-        self._raise_direct_repository_wiring_error()
+        self._require_session_factory()
+        return StartMeetingUseCase(self.get_unit_of_work)
 
     def get_rename_meeting_use_case(self) -> RenameMeetingUseCase:
-        """Reject unsafe direct repository wiring for the rename use case."""
+        """Create a Unit-of-Work-backed Meeting rename use case."""
 
-        self._raise_direct_repository_wiring_error()
+        self._require_session_factory()
+        return RenameMeetingUseCase(self.get_unit_of_work)
 
     def get_end_meeting_use_case(self) -> EndMeetingUseCase:
-        """Reject unsafe direct repository wiring for the end use case."""
+        """Create a Unit-of-Work-backed Meeting end use case."""
 
-        self._raise_direct_repository_wiring_error()
+        self._require_session_factory()
+        return EndMeetingUseCase(self.get_unit_of_work)
 
     def _require_session_factory(self) -> sessionmaker[Session]:
         """Return the active session factory or raise a lifecycle error."""
@@ -97,12 +100,3 @@ class Container:
             raise RuntimeError("Container has not been started.")
 
         return self._session_factory
-
-    @staticmethod
-    def _raise_direct_repository_wiring_error() -> NoReturn:
-        """Explain why direct repository use-case wiring is not safe yet."""
-
-        raise RuntimeError(
-            "Use cases currently require MeetingRepository directly. "
-            "Use get_unit_of_work() until they are refactored to own a UnitOfWork."
-        )

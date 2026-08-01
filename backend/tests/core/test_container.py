@@ -3,6 +3,12 @@
 import asyncio
 
 import pytest
+from app.application.use_cases import (
+    CreateMeetingUseCase,
+    EndMeetingUseCase,
+    RenameMeetingUseCase,
+    StartMeetingUseCase,
+)
 from app.core.config import Settings
 from app.core.container import Container
 
@@ -99,16 +105,30 @@ def test_containers_do_not_share_persistence_resources() -> None:
     asyncio.run(second_container.stop())
 
 
-def test_direct_repository_use_case_factories_fail_loudly() -> None:
-    """Direct use-case factories do not create unmanaged database sessions."""
+def test_use_case_factories_return_working_use_cases_after_start() -> None:
+    """Started containers wire use cases to the Unit of Work factory."""
+
+    container = Container(Settings(database_url="sqlite+pysqlite:///:memory:"))
+    asyncio.run(container.start())
+
+    assert isinstance(container.get_create_meeting_use_case(), CreateMeetingUseCase)
+    assert isinstance(container.get_start_meeting_use_case(), StartMeetingUseCase)
+    assert isinstance(container.get_rename_meeting_use_case(), RenameMeetingUseCase)
+    assert isinstance(container.get_end_meeting_use_case(), EndMeetingUseCase)
+
+    asyncio.run(container.stop())
+
+
+def test_use_case_factories_raise_before_start() -> None:
+    """Use cases cannot be wired before persistence resources are available."""
 
     container = Container(Settings(database_url="sqlite+pysqlite:///:memory:"))
 
-    with pytest.raises(RuntimeError, match="get_unit_of_work"):
+    with pytest.raises(RuntimeError, match="has not been started"):
         container.get_create_meeting_use_case()
-    with pytest.raises(RuntimeError, match="get_unit_of_work"):
+    with pytest.raises(RuntimeError, match="has not been started"):
         container.get_start_meeting_use_case()
-    with pytest.raises(RuntimeError, match="get_unit_of_work"):
+    with pytest.raises(RuntimeError, match="has not been started"):
         container.get_rename_meeting_use_case()
-    with pytest.raises(RuntimeError, match="get_unit_of_work"):
+    with pytest.raises(RuntimeError, match="has not been started"):
         container.get_end_meeting_use_case()
