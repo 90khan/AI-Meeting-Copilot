@@ -1,9 +1,23 @@
 """Application composition root."""
 
 import logging
+from typing import NoReturn
 
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import Session, sessionmaker
+
+from app.application.interfaces import UnitOfWork
+from app.application.use_cases import (
+    CreateMeetingUseCase,
+    EndMeetingUseCase,
+    RenameMeetingUseCase,
+    StartMeetingUseCase,
+)
 from app.core.config import Settings
 from app.core.logging import get_logger, setup_logging
+from app.infrastructure.database.engine import create_engine_from_settings
+from app.infrastructure.database.session import create_session_factory
+from app.infrastructure.persistence.sqlalchemy import SQLAlchemyUnitOfWork
 
 
 class Container:
@@ -13,13 +27,33 @@ class Container:
         """Create a container using the supplied immutable application settings."""
 
         self._settings = settings
+        self._engine: Engine | None = None
+        self._session_factory: sessionmaker[Session] | None = None
         setup_logging(settings)
 
     async def start(self) -> None:
-        """Start managed infrastructure resources when they are introduced."""
+        """Create lifecycle-managed persistence resources when needed."""
+
+        if self._engine is not None:
+            return
+
+        engine = create_engine_from_settings(self._settings)
+        self._engine = engine
+        self._session_factory = create_session_factory(engine)
 
     async def stop(self) -> None:
-        """Stop managed infrastructure resources when they are introduced."""
+        """Dispose lifecycle-managed persistence resources when present."""
+
+        engine = self._engine
+        if engine is None:
+            self._session_factory = None
+            return
+
+        try:
+            engine.dispose()
+        finally:
+            self._engine = None
+            self._session_factory = None
 
     def get_settings(self) -> Settings:
         """Return the container's immutable application settings."""
@@ -30,3 +64,45 @@ class Container:
         """Return a module-qualified logger configured by this container."""
 
         return get_logger(name)
+
+    def get_unit_of_work(self) -> UnitOfWork:
+        """Create an independent Unit of Work from active persistence resources."""
+
+        return SQLAlchemyUnitOfWork(self._require_session_factory())
+
+    def get_create_meeting_use_case(self) -> CreateMeetingUseCase:
+        """Reject unsafe direct repository wiring for the create use case."""
+
+        self._raise_direct_repository_wiring_error()
+
+    def get_start_meeting_use_case(self) -> StartMeetingUseCase:
+        """Reject unsafe direct repository wiring for the start use case."""
+
+        self._raise_direct_repository_wiring_error()
+
+    def get_rename_meeting_use_case(self) -> RenameMeetingUseCase:
+        """Reject unsafe direct repository wiring for the rename use case."""
+
+        self._raise_direct_repository_wiring_error()
+
+    def get_end_meeting_use_case(self) -> EndMeetingUseCase:
+        """Reject unsafe direct repository wiring for the end use case."""
+
+        self._raise_direct_repository_wiring_error()
+
+    def _require_session_factory(self) -> sessionmaker[Session]:
+        """Return the active session factory or raise a lifecycle error."""
+
+        if self._session_factory is None:
+            raise RuntimeError("Container has not been started.")
+
+        return self._session_factory
+
+    @staticmethod
+    def _raise_direct_repository_wiring_error() -> NoReturn:
+        """Explain why direct repository use-case wiring is not safe yet."""
+
+        raise RuntimeError(
+            "Use cases currently require MeetingRepository directly. "
+            "Use get_unit_of_work() until they are refactored to own a UnitOfWork."
+        )

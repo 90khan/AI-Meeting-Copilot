@@ -1,0 +1,114 @@
+"""Tests for application container persistence wiring."""
+
+import asyncio
+
+import pytest
+from app.core.config import Settings
+from app.core.container import Container
+
+
+def test_start_creates_an_engine_and_session_factory() -> None:
+    """Starting the container initializes persistence resources once."""
+
+    container = Container(Settings(database_url="sqlite+pysqlite:///:memory:"))
+
+    asyncio.run(container.start())
+
+    assert container._engine is not None
+    assert container._session_factory is not None
+
+    asyncio.run(container.stop())
+
+
+def test_repeated_start_reuses_existing_persistence_resources() -> None:
+    """Starting an active container is idempotent."""
+
+    container = Container(Settings(database_url="sqlite+pysqlite:///:memory:"))
+
+    asyncio.run(container.start())
+    engine = container._engine
+    session_factory = container._session_factory
+    asyncio.run(container.start())
+
+    assert container._engine is engine
+    assert container._session_factory is session_factory
+
+    asyncio.run(container.stop())
+
+
+def test_stop_disposes_and_clears_persistence_resources() -> None:
+    """Stopping clears engine and session-factory references."""
+
+    container = Container(Settings(database_url="sqlite+pysqlite:///:memory:"))
+    asyncio.run(container.start())
+
+    asyncio.run(container.stop())
+
+    assert container._engine is None
+    assert container._session_factory is None
+
+
+def test_repeated_stop_is_safe() -> None:
+    """Stopping an already stopped container is idempotent."""
+
+    container = Container(Settings(database_url="sqlite+pysqlite:///:memory:"))
+
+    asyncio.run(container.stop())
+    asyncio.run(container.stop())
+
+    assert container._engine is None
+    assert container._session_factory is None
+
+
+def test_unit_of_work_access_before_start_raises_runtime_error() -> None:
+    """Persistence factories are unavailable before the container starts."""
+
+    container = Container(Settings(database_url="sqlite+pysqlite:///:memory:"))
+
+    with pytest.raises(RuntimeError, match="has not been started"):
+        container.get_unit_of_work()
+
+
+def test_unit_of_work_factory_returns_independent_instances() -> None:
+    """Each Unit of Work factory call creates a separate work-unit object."""
+
+    container = Container(Settings(database_url="sqlite+pysqlite:///:memory:"))
+    asyncio.run(container.start())
+
+    first_unit_of_work = container.get_unit_of_work()
+    second_unit_of_work = container.get_unit_of_work()
+
+    assert first_unit_of_work is not second_unit_of_work
+
+    asyncio.run(container.stop())
+
+
+def test_containers_do_not_share_persistence_resources() -> None:
+    """Container instances own distinct engine and session-factory state."""
+
+    first_container = Container(Settings(database_url="sqlite+pysqlite:///:memory:"))
+    second_container = Container(Settings(database_url="sqlite+pysqlite:///:memory:"))
+
+    asyncio.run(first_container.start())
+    asyncio.run(second_container.start())
+
+    assert first_container._engine is not second_container._engine
+    assert first_container._session_factory is not second_container._session_factory
+
+    asyncio.run(first_container.stop())
+    asyncio.run(second_container.stop())
+
+
+def test_direct_repository_use_case_factories_fail_loudly() -> None:
+    """Direct use-case factories do not create unmanaged database sessions."""
+
+    container = Container(Settings(database_url="sqlite+pysqlite:///:memory:"))
+
+    with pytest.raises(RuntimeError, match="get_unit_of_work"):
+        container.get_create_meeting_use_case()
+    with pytest.raises(RuntimeError, match="get_unit_of_work"):
+        container.get_start_meeting_use_case()
+    with pytest.raises(RuntimeError, match="get_unit_of_work"):
+        container.get_rename_meeting_use_case()
+    with pytest.raises(RuntimeError, match="get_unit_of_work"):
+        container.get_end_meeting_use_case()
