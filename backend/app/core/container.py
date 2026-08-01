@@ -1,6 +1,7 @@
 """Application composition root."""
 
 import logging
+from contextlib import suppress
 
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
@@ -34,6 +35,13 @@ from app.infrastructure.providers.faster_whisper import (
     FasterWhisperModelManager,
     FasterWhisperSpeechToTextProvider,
 )
+from app.infrastructure.providers.ollama import (
+    OllamaClient,
+    OllamaGermanSimplificationProvider,
+    OllamaMeetingSummarizationProvider,
+    OllamaReplyCoachingProvider,
+    OllamaTranslationProvider,
+)
 
 
 class Container:
@@ -58,11 +66,20 @@ class Container:
         ) = None
         self._faster_whisper_model_manager: FasterWhisperModelManager | None = None
         self._faster_whisper_speech_to_text_provider: SpeechToTextProvider | None = None
+        self._ollama_client: OllamaClient | None = None
+        self._ollama_translation_provider: TranslationProvider | None = None
+        self._ollama_german_simplification_provider: (
+            GermanSimplificationProvider | None
+        ) = None
+        self._ollama_reply_coaching_provider: ReplyCoachingProvider | None = None
+        self._ollama_meeting_summarization_provider: (
+            MeetingSummarizationProvider | None
+        ) = None
         self._is_started = False
         setup_logging(settings)
 
     async def start(self) -> None:
-        """Create lifecycle-managed persistence and speech-provider resources."""
+        """Create lifecycle-managed persistence and provider resources."""
 
         if self._is_started:
             return
@@ -72,14 +89,15 @@ class Container:
         self._session_factory = create_session_factory(engine)
         try:
             self._configure_speech_to_text_provider()
+            self._configure_ollama_providers()
         except Exception:
-            self._dispose_persistence_resources()
+            await self._cleanup_failed_start()
             raise
 
         self._is_started = True
 
     async def stop(self) -> None:
-        """Dispose lifecycle-managed persistence and speech-provider resources."""
+        """Dispose lifecycle-managed persistence and provider resources."""
 
         model_manager = self._faster_whisper_model_manager
         try:
@@ -89,7 +107,10 @@ class Container:
             self._faster_whisper_speech_to_text_provider = None
             self._faster_whisper_model_manager = None
             try:
-                self._dispose_persistence_resources()
+                try:
+                    await self._dispose_ollama_resources()
+                finally:
+                    self._dispose_persistence_resources()
             finally:
                 self._is_started = False
 
@@ -158,7 +179,13 @@ class Container:
         return factory()
 
     def get_translation_provider(self) -> TranslationProvider:
-        """Create a translation provider from its registered factory."""
+        """Return the active translation provider for this lifecycle."""
+
+        self._require_started()
+
+        managed_provider = self._ollama_translation_provider
+        if managed_provider is not None:
+            return managed_provider
 
         factory = self._translation_provider_factory
         if factory is None:
@@ -166,7 +193,13 @@ class Container:
         return factory()
 
     def get_german_simplification_provider(self) -> GermanSimplificationProvider:
-        """Create a German simplification provider from its registered factory."""
+        """Return the active German simplification provider for this lifecycle."""
+
+        self._require_started()
+
+        managed_provider = self._ollama_german_simplification_provider
+        if managed_provider is not None:
+            return managed_provider
 
         factory = self._german_simplification_provider_factory
         if factory is None:
@@ -176,7 +209,13 @@ class Container:
         return factory()
 
     def get_reply_coaching_provider(self) -> ReplyCoachingProvider:
-        """Create a reply-coaching provider from its registered factory."""
+        """Return the active reply-coaching provider for this lifecycle."""
+
+        self._require_started()
+
+        managed_provider = self._ollama_reply_coaching_provider
+        if managed_provider is not None:
+            return managed_provider
 
         factory = self._reply_coaching_provider_factory
         if factory is None:
@@ -184,7 +223,13 @@ class Container:
         return factory()
 
     def get_meeting_summarization_provider(self) -> MeetingSummarizationProvider:
-        """Create a meeting-summarization provider from its registered factory."""
+        """Return the active meeting-summarization provider for this lifecycle."""
+
+        self._require_started()
+
+        managed_provider = self._ollama_meeting_summarization_provider
+        if managed_provider is not None:
+            return managed_provider
 
         factory = self._meeting_summarization_provider_factory
         if factory is None:
@@ -265,6 +310,117 @@ class Container:
                 vad_enabled=self._settings.faster_whisper_vad_enabled,
             )
         )
+
+    def _configure_ollama_providers(self) -> None:
+        """Configure selected Ollama capability adapters for this lifecycle."""
+
+        selected_capabilities = (
+            (
+                "translation",
+                self._settings.translation_provider,
+                self._translation_provider_factory,
+            ),
+            (
+                "German simplification",
+                self._settings.german_simplification_provider,
+                self._german_simplification_provider_factory,
+            ),
+            (
+                "reply coaching",
+                self._settings.reply_coaching_provider,
+                self._reply_coaching_provider_factory,
+            ),
+            (
+                "meeting summarization",
+                self._settings.meeting_summarization_provider,
+                self._meeting_summarization_provider_factory,
+            ),
+        )
+        automatic_capabilities = [
+            (capability, provider_name)
+            for capability, provider_name, factory in selected_capabilities
+            if factory is None and provider_name != "unconfigured"
+        ]
+
+        for capability, provider_name in automatic_capabilities:
+            if provider_name != "ollama":
+                raise ProviderUnavailableError(
+                    f"Unsupported {capability} provider: {provider_name}."
+                )
+
+        if not automatic_capabilities:
+            return
+
+        client = OllamaClient(
+            base_url=self._settings.ollama_base_url,
+            request_timeout_seconds=self._settings.ollama_request_timeout_seconds,
+            temperature=self._settings.ollama_temperature,
+            context_length=self._settings.ollama_context_length,
+            keep_alive=self._settings.ollama_keep_alive,
+        )
+        self._ollama_client = client
+
+        if self._translation_provider_factory is None and (
+            self._settings.translation_provider == "ollama"
+        ):
+            self._ollama_translation_provider = OllamaTranslationProvider(
+                client=client,
+                model=self._settings.ollama_translation_model,
+            )
+        if self._german_simplification_provider_factory is None and (
+            self._settings.german_simplification_provider == "ollama"
+        ):
+            self._ollama_german_simplification_provider = (
+                OllamaGermanSimplificationProvider(
+                    client=client,
+                    model=self._settings.ollama_german_simplification_model,
+                )
+            )
+        if self._reply_coaching_provider_factory is None and (
+            self._settings.reply_coaching_provider == "ollama"
+        ):
+            self._ollama_reply_coaching_provider = OllamaReplyCoachingProvider(
+                client=client,
+                model=self._settings.ollama_reply_coaching_model,
+            )
+        if self._meeting_summarization_provider_factory is None and (
+            self._settings.meeting_summarization_provider == "ollama"
+        ):
+            self._ollama_meeting_summarization_provider = (
+                OllamaMeetingSummarizationProvider(
+                    client=client,
+                    model=self._settings.ollama_meeting_summarization_model,
+                )
+            )
+
+    async def _cleanup_failed_start(self) -> None:
+        """Release partially created resources while preserving the startup error."""
+
+        try:
+            with suppress(Exception):
+                await self._dispose_ollama_resources()
+            model_manager = self._faster_whisper_model_manager
+            if model_manager is not None:
+                with suppress(Exception):
+                    model_manager.close()
+        finally:
+            self._faster_whisper_speech_to_text_provider = None
+            self._faster_whisper_model_manager = None
+            self._dispose_persistence_resources()
+
+    async def _dispose_ollama_resources(self) -> None:
+        """Close the shared Ollama client and clear its lifecycle-owned adapters."""
+
+        client = self._ollama_client
+        try:
+            if client is not None:
+                await client.close()
+        finally:
+            self._ollama_translation_provider = None
+            self._ollama_german_simplification_provider = None
+            self._ollama_reply_coaching_provider = None
+            self._ollama_meeting_summarization_provider = None
+            self._ollama_client = None
 
     def _dispose_persistence_resources(self) -> None:
         """Dispose persistence resources without affecting provider registrations."""

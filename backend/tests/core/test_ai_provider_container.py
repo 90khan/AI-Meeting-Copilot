@@ -8,7 +8,6 @@ from app.application.dto.ai import (
     TranslationRequest,
     TranslationResult,
 )
-from app.application.exceptions import ProviderUnavailableError
 from app.application.interfaces import TranslationProvider
 from app.core.config import Settings
 from app.core.container import Container
@@ -36,8 +35,8 @@ def test_speech_provider_access_before_start_raises_a_lifecycle_error() -> None:
         container.get_speech_to_text_provider()
 
 
-def test_missing_non_speech_provider_registration_raises_provider_error() -> None:
-    """Unresolved non-lifecycle provider capabilities keep their current behavior."""
+def test_non_speech_provider_access_before_start_raises_a_lifecycle_error() -> None:
+    """All provider capabilities are available only during an active lifecycle."""
 
     container = Container(Settings(database_url="sqlite+pysqlite:///:memory:"))
 
@@ -47,7 +46,7 @@ def test_missing_non_speech_provider_registration_raises_provider_error() -> Non
         container.get_reply_coaching_provider,
         container.get_meeting_summarization_provider,
     ):
-        with pytest.raises(ProviderUnavailableError, match="not configured"):
+        with pytest.raises(RuntimeError, match="has not been started"):
             resolver()
 
 
@@ -63,14 +62,18 @@ def test_registered_provider_factory_resolves_a_new_provider_per_call() -> None:
         return provider
 
     container.register_translation_provider_factory(factory)
+    asyncio.run(container.start())
 
-    first_provider = container.get_translation_provider()
-    second_provider = container.get_translation_provider()
+    try:
+        first_provider = container.get_translation_provider()
+        second_provider = container.get_translation_provider()
 
-    assert isinstance(first_provider, FakeTranslationProvider)
-    assert isinstance(second_provider, FakeTranslationProvider)
-    assert first_provider is not second_provider
-    assert len(created_providers) == 2
+        assert isinstance(first_provider, FakeTranslationProvider)
+        assert isinstance(second_provider, FakeTranslationProvider)
+        assert first_provider is not second_provider
+        assert len(created_providers) == 2
+    finally:
+        asyncio.run(container.stop())
 
 
 def test_provider_registration_is_sealed_while_container_is_started() -> None:
