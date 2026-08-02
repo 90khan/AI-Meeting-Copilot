@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"Default capabilities for the desktop application.","local":true,"windows":["main"],"permissions":["core:default"]}}
+{"default":{"identifier":"default","description":"Only core permissions required for desktop lifecycle commands.","local":true,"windows":["main"],"permissions":["core:default"]}}
