@@ -8,6 +8,7 @@ use std::{
 };
 
 use futures_util::{SinkExt, StreamExt};
+use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use tauri::State;
 use thiserror::Error;
@@ -268,6 +269,60 @@ impl LiveTranscriptionClient {
     pub async fn status(&self) -> LiveTranscriptionStatus {
         let state = self.state.lock().await;
         public_status(&state)
+    }
+
+    async fn create_meeting(
+        &self,
+        name: String,
+    ) -> Result<MeetingIdentifier, LiveTranscriptionClientError> {
+        if name.trim().is_empty() {
+            return Err(LiveTranscriptionClientError::ProtocolFailed);
+        }
+        let connection = self
+            .sidecar_manager
+            .live_transcription_connection()
+            .await
+            .map_err(|_| LiveTranscriptionClientError::NotConnected)?;
+        let response = reqwest::Client::new()
+            .post(format!(
+                "http://{}:{}/api/v1/meetings",
+                connection.host, connection.port
+            ))
+            .header("content-type", "application/json")
+            .body(serde_json::json!({ "name": name }).to_string())
+            .send()
+            .await
+            .map_err(|_| LiveTranscriptionClientError::ConnectionFailed)?;
+        if response.status() != StatusCode::CREATED {
+            return Err(LiveTranscriptionClientError::ProtocolFailed);
+        }
+        let payload = response
+            .text()
+            .await
+            .map_err(|_| LiveTranscriptionClientError::ProtocolFailed)?;
+        serde_json::from_str::<MeetingIdentifier>(&payload)
+            .map_err(|_| LiveTranscriptionClientError::ProtocolFailed)
+    }
+
+    async fn start_meeting(&self, meeting_id: Uuid) -> Result<(), LiveTranscriptionClientError> {
+        let connection = self
+            .sidecar_manager
+            .live_transcription_connection()
+            .await
+            .map_err(|_| LiveTranscriptionClientError::NotConnected)?;
+        let response = reqwest::Client::new()
+            .post(format!(
+                "http://{}:{}/api/v1/meetings/{meeting_id}/start",
+                connection.host, connection.port
+            ))
+            .send()
+            .await
+            .map_err(|_| LiveTranscriptionClientError::ConnectionFailed)?;
+        if response.status() == StatusCode::NO_CONTENT {
+            Ok(())
+        } else {
+            Err(LiveTranscriptionClientError::ProtocolFailed)
+        }
     }
 
     /// Begin one validated backend session. This remains Rust-internal until audio capture exists.
@@ -598,6 +653,18 @@ pub struct StartLiveTranscriptionSessionInput {
     assist_mode: AssistModeConfiguration,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateMeetingInput {
+    name: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeetingIdentifier {
+    meeting_id: Uuid,
+}
+
 /// Start a session with configuration fixed for its entire lifecycle.
 #[tauri::command]
 pub async fn start_live_transcription_session(
@@ -613,6 +680,39 @@ pub async fn start_live_transcription_session(
         )
         .await
         .map_err(|_| "The live transcription session could not be started.".to_owned())?;
+    Ok(client.status().await)
+}
+
+#[tauri::command]
+pub async fn create_meeting(
+    client: State<'_, LiveTranscriptionClient>,
+    input: CreateMeetingInput,
+) -> Result<MeetingIdentifier, String> {
+    client
+        .create_meeting(input.name)
+        .await
+        .map_err(|_| "The Meeting could not be created.".to_owned())
+}
+
+#[tauri::command]
+pub async fn start_meeting(
+    client: State<'_, LiveTranscriptionClient>,
+    meeting_id: Uuid,
+) -> Result<(), String> {
+    client
+        .start_meeting(meeting_id)
+        .await
+        .map_err(|_| "The Meeting could not be started.".to_owned())
+}
+
+#[tauri::command]
+pub async fn end_live_transcription_session(
+    client: State<'_, LiveTranscriptionClient>,
+) -> Result<LiveTranscriptionStatus, String> {
+    client
+        .end_session()
+        .await
+        .map_err(|_| "The live transcription session could not be ended.".to_owned())?;
     Ok(client.status().await)
 }
 

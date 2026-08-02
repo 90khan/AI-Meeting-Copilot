@@ -199,6 +199,30 @@ uv run pytest -m local_ai -v
 These tests may be slow on CPU. They use concise synthetic inputs and do not
 print generated content.
 
+## Opt-in Desktop Assist Mode Smoke Validation
+
+Desktop Assist Mode validation is manual and opt-in because macOS capture
+permissions and display selection require developer interaction. Normal CI
+never runs it.
+
+Start only after Faster-Whisper is configured locally, Ollama is running with
+the configured models already pulled, and macOS Screen Recording/System Audio
+and Microphone permissions have been granted:
+
+```bash
+AI_MEETING_COPILOT_RUN_LOCAL_ASSIST_TESTS=1 \
+AI_MEETING_COPILOT_RUN_LOCAL_NATIVE_AUDIO_TESTS=1 \
+npm run native-audio:smoke
+```
+
+In the desktop app, start the backend, enter a Meeting name, start a session,
+select capture sources, and begin capture. Confirm that a finalized transcript
+row appears, then that its translation (and optional simplification) attaches
+to the same row and reply suggestions appear. Do not print or copy transcript,
+prompt, token, or audio data during validation. End the session, stop capture,
+and quit the app; this stops the WebSocket and sidecar while leaving the
+persisted Meeting transcript intact.
+
 ---
 
 # Translation Testing

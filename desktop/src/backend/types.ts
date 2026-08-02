@@ -41,6 +41,10 @@ export interface StartLiveTranscriptionSessionInput {
   assistMode: AssistModeSessionConfiguration;
 }
 
+export interface MeetingIdentifier {
+  meetingId: string;
+}
+
 export type CaptureAuthorizationState =
   | "not_determined"
   | "authorized"

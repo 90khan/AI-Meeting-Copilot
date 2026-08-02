@@ -7,6 +7,7 @@ import type {
   CaptureDisplaySource,
   CaptureMicrophoneSource,
   LiveTranscriptionStatus,
+  MeetingIdentifier,
   StartLiveTranscriptionSessionInput,
   StartAudioCaptureInput,
 } from "./types";
@@ -27,6 +28,22 @@ export function getLiveTranscriptionStatus(): Promise<LiveTranscriptionStatus> {
   return invoke<LiveTranscriptionStatus>("get_live_transcription_status");
 }
 
+export function connectLiveTranscription(): Promise<LiveTranscriptionStatus> {
+  return invoke<LiveTranscriptionStatus>("connect_live_transcription");
+}
+
+export function disconnectLiveTranscription(): Promise<LiveTranscriptionStatus> {
+  return invoke<LiveTranscriptionStatus>("disconnect_live_transcription");
+}
+
+export function createMeeting(name: string): Promise<MeetingIdentifier> {
+  return invoke<MeetingIdentifier>("create_meeting", { input: { name } });
+}
+
+export function startMeeting(meetingId: string): Promise<void> {
+  return invoke<void>("start_meeting", { meetingId });
+}
+
 export function startLiveTranscriptionSession(
   input: StartLiveTranscriptionSessionInput,
 ): Promise<LiveTranscriptionStatus> {
@@ -38,6 +55,10 @@ export function startLiveTranscriptionSession(
     return Promise.reject(new Error("Invalid Assist Mode configuration."));
   }
   return invoke<LiveTranscriptionStatus>("start_live_transcription_session", { input });
+}
+
+export function endLiveTranscriptionSession(): Promise<LiveTranscriptionStatus> {
+  return invoke<LiveTranscriptionStatus>("end_live_transcription_session");
 }
 
 export function getAudioCaptureStatus(): Promise<AudioCaptureStatus> {

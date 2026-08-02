@@ -14,6 +14,12 @@ import {
   requestCaptureAuthorization,
   startAudioCapture,
   startBackend,
+  connectLiveTranscription,
+  createMeeting,
+  disconnectLiveTranscription,
+  endLiveTranscriptionSession,
+  startLiveTranscriptionSession,
+  startMeeting,
   stopAudioCapture,
   stopBackend,
 } from "./backend/client";
@@ -55,7 +61,7 @@ export default function App() {
   const [includeSystemAudio, setIncludeSystemAudio] = useState(true);
   const [includeMicrophone, setIncludeMicrophone] = useState(true);
   const [pendingOperation, setPendingOperation] = useState<
-    "start-backend" | "stop-backend" | "permissions" | "start-capture" | "stop-capture" | null
+    "start-backend" | "stop-backend" | "permissions" | "start-capture" | "stop-capture" | "start-session" | "end-session" | null
   >(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [assistState, dispatchAssist] = useReducer(assistReducer, initialAssistState);
@@ -64,6 +70,8 @@ export default function App() {
   const [simplificationEnabled, setSimplificationEnabled] = useState(false);
   const [simplificationLevel, setSimplificationLevel] = useState<"b1" | "b2">("b1");
   const [replyCoachingEnabled, setReplyCoachingEnabled] = useState(true);
+  const [meetingName, setMeetingName] = useState("");
+  const [activeMeetingId, setActiveMeetingId] = useState<string | null>(null);
   const assistSessionConfiguration: AssistModeSessionConfiguration = {
     enabled: assistEnabled,
     translationEnabled,
@@ -208,6 +216,53 @@ export default function App() {
     }
   };
 
+  const handleStartSession = async (): Promise<void> => {
+    if (!backendReady || meetingName.trim().length === 0) {
+      setErrorMessage("A Meeting name is required.");
+      return;
+    }
+    setPendingOperation("start-session");
+    setErrorMessage(null);
+    try {
+      const connection = liveStatus?.status === "connected" || liveStatus?.status === "session_active"
+        ? liveStatus
+        : await connectLiveTranscription();
+      setLiveStatus(connection);
+      if (connection.status !== "connected") throw new Error("Session unavailable");
+      const meeting = await createMeeting(meetingName.trim());
+      await startMeeting(meeting.meetingId);
+      const session = await startLiveTranscriptionSession({
+        meetingId: meeting.meetingId,
+        languageHint: "de",
+        source: "mixed",
+        assistMode: assistSessionConfiguration,
+      });
+      setActiveMeetingId(meeting.meetingId);
+      setLiveStatus(session);
+      dispatchAssist({ type: "connection", status: "active" });
+    } catch {
+      setErrorMessage("The live session could not be started.");
+    } finally {
+      setPendingOperation(null);
+    }
+  };
+
+  const handleEndSession = async (): Promise<void> => {
+    setPendingOperation("end-session");
+    setErrorMessage(null);
+    try {
+      if (captureStatus?.state === "capturing") setCaptureStatus(await stopAudioCapture());
+      if (liveStatus?.status === "session_active") setLiveStatus(await endLiveTranscriptionSession());
+      setLiveStatus(await disconnectLiveTranscription());
+      setActiveMeetingId(null);
+      dispatchAssist({ type: "clear" });
+    } catch {
+      setErrorMessage("The live session could not be ended.");
+    } finally {
+      setPendingOperation(null);
+    }
+  };
+
   const isPending = pendingOperation !== null;
   const backendReady = backendStatus?.status === "ready";
   const liveSessionActive = liveStatus?.status === "session_active";
@@ -231,6 +286,8 @@ export default function App() {
     !isPending && (backendStatus?.status === "ready" || backendStatus?.status === "failed");
   const controlsDisabled = isPending || !backendReady;
   const assistControlsDisabled = liveSessionActive;
+  const canStartSession = !isPending && backendReady && !liveSessionActive && meetingName.trim().length > 0;
+  const canEndSession = !isPending && liveSessionActive;
 
   return (
     <main className="app-shell">
@@ -250,6 +307,23 @@ export default function App() {
             {pendingOperation === "stop-backend" ? "Stopping Backend…" : "Stop Backend"}
           </button>
         </div>
+
+        <section className="session-panel" aria-labelledby="session-title">
+          <h2 id="session-title">Live session</h2>
+          <label>
+            Meeting name
+            <input value={meetingName} disabled={liveSessionActive || isPending} onChange={(event) => setMeetingName(event.target.value)} />
+          </label>
+          <div className="actions">
+            <button type="button" disabled={!canStartSession} onClick={handleStartSession}>
+              {pendingOperation === "start-session" ? "Starting Session…" : "Start Session"}
+            </button>
+            <button type="button" disabled={!canEndSession} onClick={handleEndSession}>
+              {pendingOperation === "end-session" ? "Ending Session…" : "End Session"}
+            </button>
+          </div>
+          {activeMeetingId !== null && <p aria-live="polite">Session active.</p>}
+        </section>
 
         <section className="capture-panel" aria-labelledby="capture-title">
           <h2 id="capture-title">Native Audio Capture</h2>
