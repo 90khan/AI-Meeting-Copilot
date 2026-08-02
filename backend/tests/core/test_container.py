@@ -4,6 +4,7 @@ import asyncio
 
 import pytest
 from app.application.use_cases import (
+    AddTranscriptUseCase,
     CreateMeetingUseCase,
     EndMeetingUseCase,
     RenameMeetingUseCase,
@@ -112,6 +113,7 @@ def test_use_case_factories_return_working_use_cases_after_start() -> None:
     asyncio.run(container.start())
 
     assert isinstance(container.get_create_meeting_use_case(), CreateMeetingUseCase)
+    assert isinstance(container.get_add_transcript_use_case(), AddTranscriptUseCase)
     assert isinstance(container.get_start_meeting_use_case(), StartMeetingUseCase)
     assert isinstance(container.get_rename_meeting_use_case(), RenameMeetingUseCase)
     assert isinstance(container.get_end_meeting_use_case(), EndMeetingUseCase)
@@ -126,6 +128,8 @@ def test_use_case_factories_raise_before_start() -> None:
 
     with pytest.raises(RuntimeError, match="has not been started"):
         container.get_create_meeting_use_case()
+    with pytest.raises(RuntimeError, match="has not been started"):
+        container.get_add_transcript_use_case()
     with pytest.raises(RuntimeError, match="has not been started"):
         container.get_start_meeting_use_case()
     with pytest.raises(RuntimeError, match="has not been started"):

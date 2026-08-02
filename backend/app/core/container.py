@@ -21,6 +21,7 @@ from app.application.interfaces import (
     UnitOfWork,
 )
 from app.application.use_cases import (
+    AddTranscriptUseCase,
     CreateMeetingUseCase,
     EndMeetingUseCase,
     RenameMeetingUseCase,
@@ -248,6 +249,12 @@ class Container:
 
         self._require_session_factory()
         return CreateMeetingUseCase(self.get_unit_of_work)
+
+    def get_add_transcript_use_case(self) -> AddTranscriptUseCase:
+        """Create a Unit-of-Work-backed transcript addition use case."""
+
+        self._require_session_factory()
+        return AddTranscriptUseCase(self.get_unit_of_work)
 
     def get_start_meeting_use_case(self) -> StartMeetingUseCase:
         """Create a Unit-of-Work-backed Meeting start use case."""
