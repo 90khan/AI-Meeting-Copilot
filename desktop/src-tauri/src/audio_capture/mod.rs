@@ -10,6 +10,7 @@ pub(crate) mod mixer;
 pub(crate) mod pcm16;
 pub(crate) mod processing;
 pub(crate) mod resampler;
+pub(crate) mod sender;
 pub(crate) mod sources;
 pub(crate) mod status;
 pub(crate) mod swift_bridge;

@@ -2,7 +2,10 @@
 
 #![allow(dead_code)] // Rust-only session and audio APIs are reserved for capture wiring.
 
-use std::sync::Arc;
+use std::{
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
@@ -65,12 +68,25 @@ pub enum LiveTranscriptionClientError {
     ConnectionFailed,
     #[error("The live transcription protocol failed.")]
     ProtocolFailed,
+    #[error("The audio chunk timestamp is invalid.")]
+    InvalidTimestamp,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ChunkSubmissionResult {
+    pub(crate) sequence: u64,
+    pub(crate) skipped_silence: bool,
+    pub(crate) accepted_segment_count: usize,
+    pub(crate) gap_reported: bool,
 }
 
 struct ActiveSession {
     session_id: Uuid,
     expected_sequence: u64,
     in_flight: bool,
+    anchor_monotonic_seconds: f64,
+    anchor_utc_unix_seconds: i64,
+    last_capture_started_at_seconds: f64,
 }
 
 struct ClientState {
@@ -213,6 +229,12 @@ impl LiveTranscriptionClient {
                     session_id: started.session_id,
                     expected_sequence: started.expected_sequence,
                     in_flight: false,
+                    anchor_monotonic_seconds: 0.0,
+                    anchor_utc_unix_seconds: SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map_err(|_| LiveTranscriptionClientError::InvalidTimestamp)?
+                        .as_secs() as i64,
+                    last_capture_started_at_seconds: 0.0,
                 });
                 Ok(())
             }
@@ -255,6 +277,85 @@ impl LiveTranscriptionClient {
                     session.in_flight = false;
                 }
                 Ok(())
+            }
+            Err(error) => {
+                if let Some(session) = state.session.as_mut() {
+                    session.in_flight = false;
+                }
+                if error == LiveTranscriptionClientError::ConnectionFailed {
+                    mark_failed_state(&mut state);
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Submit one finalized WAV chunk. Session IDs, protocol version, and the
+    /// next AMCP sequence remain exclusively owned by this client.
+    pub(crate) async fn submit_wav_chunk(
+        &self,
+        capture_started_at_seconds: f64,
+        overlap_seconds: f64,
+        wav_payload: Vec<u8>,
+    ) -> Result<ChunkSubmissionResult, LiveTranscriptionClientError> {
+        if !capture_started_at_seconds.is_finite() || capture_started_at_seconds < 0.0 {
+            return Err(LiveTranscriptionClientError::InvalidTimestamp);
+        }
+        let mut state = self.state.lock().await;
+        if state.status != LiveTranscriptionLifecycleStatus::SessionActive {
+            return Err(LiveTranscriptionClientError::SessionNotActive);
+        }
+        let max_payload = state.max_binary_payload_bytes;
+        let session = state
+            .session
+            .as_mut()
+            .ok_or(LiveTranscriptionClientError::SessionNotActive)?;
+        if session.in_flight {
+            return Err(LiveTranscriptionClientError::SessionNotActive);
+        }
+        if capture_started_at_seconds + f64::EPSILON < session.last_capture_started_at_seconds
+            || capture_started_at_seconds < session.anchor_monotonic_seconds
+        {
+            return Err(LiveTranscriptionClientError::InvalidTimestamp);
+        }
+        let utc_seconds = session.anchor_utc_unix_seconds
+            + (capture_started_at_seconds - session.anchor_monotonic_seconds).floor() as i64;
+        let metadata = AudioChunkFrameMetadata {
+            session_id: session.session_id,
+            sequence: session.expected_sequence,
+            capture_started_at: format_utc_timestamp(utc_seconds)?,
+            source: AudioSource::Mixed,
+            sample_rate_hz: 16_000,
+            channels: 1,
+            overlap_seconds,
+            byte_length: wav_payload.len(),
+        };
+        let frame = build_audio_chunk_frame(&metadata, &wav_payload, max_payload)
+            .map_err(map_binary_error)?;
+        session.in_flight = true;
+        let socket = state
+            .socket
+            .as_mut()
+            .ok_or(LiveTranscriptionClientError::NotConnected)?;
+        if socket.send(Message::Binary(frame.into())).await.is_err() {
+            mark_failed_state(&mut state);
+            return Err(LiveTranscriptionClientError::ConnectionFailed);
+        }
+        match receive_until_chunk_result(socket, metadata.sequence).await {
+            Ok((skipped_silence, accepted_segment_count)) => {
+                let session = state
+                    .session
+                    .as_mut()
+                    .ok_or(LiveTranscriptionClientError::SessionNotActive)?;
+                session.expected_sequence += 1;
+                session.last_capture_started_at_seconds = capture_started_at_seconds;
+                session.in_flight = false;
+                Ok(ChunkSubmissionResult {
+                    sequence: metadata.sequence,
+                    skipped_silence,
+                    accepted_segment_count,
+                    gap_reported: false,
+                })
             }
             Err(error) => {
                 if let Some(session) = state.session.as_mut() {
@@ -378,7 +479,7 @@ async fn receive_until_chunk_terminal(
 ) -> Result<(), LiveTranscriptionClientError> {
     loop {
         match receive_server_message(socket).await? {
-            ServerMessage::ChunkResult { chunk_sequence } if chunk_sequence == sequence => {
+            ServerMessage::ChunkResult { chunk_sequence, .. } if chunk_sequence == sequence => {
                 return Ok(())
             }
             ServerMessage::Status => continue,
@@ -389,6 +490,46 @@ async fn receive_until_chunk_terminal(
             _ => return Err(LiveTranscriptionClientError::ProtocolFailed),
         }
     }
+}
+
+async fn receive_until_chunk_result(
+    socket: &mut LocalSocket,
+    sequence: u64,
+) -> Result<(bool, usize), LiveTranscriptionClientError> {
+    loop {
+        match receive_server_message(socket).await? {
+            ServerMessage::ChunkResult {
+                chunk_sequence,
+                skipped_silence,
+                accepted_segment_count,
+            } if chunk_sequence == sequence => {
+                return Ok((skipped_silence, accepted_segment_count))
+            }
+            ServerMessage::Status => continue,
+            ServerMessage::Error(error) if error.fatal => {
+                return Err(LiveTranscriptionClientError::ConnectionFailed)
+            }
+            ServerMessage::Error(_) => return Err(LiveTranscriptionClientError::ProtocolFailed),
+            _ => return Err(LiveTranscriptionClientError::ProtocolFailed),
+        }
+    }
+}
+
+fn format_utc_timestamp(seconds: i64) -> Result<String, LiveTranscriptionClientError> {
+    let mut timestamp = seconds as libc::time_t;
+    let mut value: libc::tm = unsafe { std::mem::zeroed() };
+    if unsafe { libc::gmtime_r(&mut timestamp, &mut value) }.is_null() {
+        return Err(LiveTranscriptionClientError::InvalidTimestamp);
+    }
+    Ok(format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        value.tm_year + 1900,
+        value.tm_mon + 1,
+        value.tm_mday,
+        value.tm_hour,
+        value.tm_min,
+        value.tm_sec
+    ))
 }
 
 async fn receive_until_session_stopped(
@@ -502,6 +643,9 @@ mod tests {
                 session_id,
                 expected_sequence: 2,
                 in_flight: false,
+                anchor_monotonic_seconds: 0.0,
+                anchor_utc_unix_seconds: 0,
+                last_capture_started_at_seconds: 0.0,
             }),
             ..ClientState::default()
         };

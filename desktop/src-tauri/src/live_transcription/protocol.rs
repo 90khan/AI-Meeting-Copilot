@@ -122,7 +122,11 @@ pub(crate) fn serialize_end_session(
 pub(crate) enum ServerMessage {
     HelloAck(HelloAck),
     SessionStarted(SessionStarted),
-    ChunkResult { chunk_sequence: u64 },
+    ChunkResult {
+        chunk_sequence: u64,
+        skipped_silence: bool,
+        accepted_segment_count: usize,
+    },
     Status,
     Error(ProtocolFailure),
     SessionStopped(SessionStopped),
@@ -254,6 +258,11 @@ fn parse_chunk_result(
     }
     Ok(ServerMessage::ChunkResult {
         chunk_sequence: required_u64(object, "chunk_sequence")?,
+        skipped_silence: object
+            .get("skipped_silence")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        accepted_segment_count: segments.len(),
     })
 }
 
