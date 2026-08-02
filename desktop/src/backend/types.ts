@@ -12,3 +12,59 @@ export interface BackendStatus {
   port: number | null;
   message: string | null;
 }
+
+export type LiveTranscriptionLifecycleStatus =
+  | "disconnected"
+  | "connecting"
+  | "connected"
+  | "session_active"
+  | "stopping"
+  | "failed";
+
+export interface LiveTranscriptionStatus {
+  status: LiveTranscriptionLifecycleStatus;
+  message: string | null;
+}
+
+export type CaptureAuthorizationState =
+  | "not_determined"
+  | "authorized"
+  | "denied"
+  | "restricted";
+
+export interface CaptureAuthorization {
+  screenCapture: CaptureAuthorizationState;
+  microphone: CaptureAuthorizationState;
+}
+
+export interface CaptureDisplaySource {
+  id: number;
+  width: number;
+  height: number;
+  isPrimary: boolean;
+}
+
+export interface CaptureMicrophoneSource {
+  id: string;
+  isDefault: boolean;
+}
+
+export type AudioCaptureState =
+  | "stopped"
+  | "starting"
+  | "capturing"
+  | "stopping"
+  | "failed";
+
+export interface AudioCaptureStatus {
+  state: AudioCaptureState;
+  message: string | null;
+}
+
+export interface StartAudioCaptureInput {
+  displayId: number;
+  microphoneDeviceId: string | null;
+  includeSystemAudio: boolean;
+  includeMicrophone: boolean;
+  excludeCurrentProcessAudio: boolean;
+}

@@ -44,6 +44,12 @@ impl<B: NativeAudioCaptureBridge> AudioCaptureCoordinator<B> {
         }
     }
 
+    /// Administrative operations are intentionally exposed only to the Rust
+    /// command boundary; audio callbacks never use this access path.
+    pub(crate) fn bridge_mut(&mut self) -> &mut B {
+        &mut self.bridge
+    }
+
     /// Starts capture only after a submission boundary is supplied.
     pub(crate) async fn start(
         &mut self,

@@ -553,3 +553,11 @@ Run this manually on macOS 15 or later with a development build. Grant or deny S
 This is intentionally a local manual check; automated tests use fake native callbacks and never start a real ScreenCaptureKit stream.
 
 ---
+
+# macOS Capture Command Flow
+
+For a local macOS validation, start the desktop app, start the backend, and connect live transcription. Create an active Meeting and live-transcription session using the existing internal or test workflow. Request capture permissions, select a display and optional microphone, then start capture and confirm the status becomes `capturing`. Stop capture and confirm it returns to `stopped` without stopping the backend or disconnecting the WebSocket.
+
+Do not record or print raw audio, transcripts, tokens, or native error details during this check.
+
+---

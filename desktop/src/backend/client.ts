@@ -1,6 +1,14 @@
 import { invoke } from "@tauri-apps/api/core";
 
-import type { BackendStatus } from "./types";
+import type {
+  AudioCaptureStatus,
+  BackendStatus,
+  CaptureAuthorization,
+  CaptureDisplaySource,
+  CaptureMicrophoneSource,
+  LiveTranscriptionStatus,
+  StartAudioCaptureInput,
+} from "./types";
 
 export function startBackend(): Promise<BackendStatus> {
   return invoke<BackendStatus>("start_backend");
@@ -12,4 +20,38 @@ export function stopBackend(): Promise<BackendStatus> {
 
 export function getBackendStatus(): Promise<BackendStatus> {
   return invoke<BackendStatus>("get_backend_status");
+}
+
+export function getLiveTranscriptionStatus(): Promise<LiveTranscriptionStatus> {
+  return invoke<LiveTranscriptionStatus>("get_live_transcription_status");
+}
+
+export function getAudioCaptureStatus(): Promise<AudioCaptureStatus> {
+  return invoke<AudioCaptureStatus>("get_audio_capture_status");
+}
+
+export function getCaptureAuthorization(): Promise<CaptureAuthorization> {
+  return invoke<CaptureAuthorization>("get_capture_authorization");
+}
+
+export function requestCaptureAuthorization(): Promise<CaptureAuthorization> {
+  return invoke<CaptureAuthorization>("request_capture_authorization");
+}
+
+export function listCaptureDisplays(): Promise<CaptureDisplaySource[]> {
+  return invoke<CaptureDisplaySource[]>("list_capture_displays");
+}
+
+export function listCaptureMicrophones(): Promise<CaptureMicrophoneSource[]> {
+  return invoke<CaptureMicrophoneSource[]>("list_capture_microphones");
+}
+
+export function startAudioCapture(
+  input: StartAudioCaptureInput,
+): Promise<AudioCaptureStatus> {
+  return invoke<AudioCaptureStatus>("start_audio_capture", { input });
+}
+
+export function stopAudioCapture(): Promise<AudioCaptureStatus> {
+  return invoke<AudioCaptureStatus>("stop_audio_capture");
 }
