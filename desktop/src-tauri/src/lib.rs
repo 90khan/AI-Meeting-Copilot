@@ -1,3 +1,4 @@
+mod audio_capture;
 mod live_transcription;
 mod sidecar;
 
