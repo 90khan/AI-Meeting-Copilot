@@ -1,4 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useReducer, useState } from "react";
+
+import { subscribeToAssistEvents } from "./assist/events";
+import { assistReducer, initialAssistState } from "./assist/state";
+import { AssistModePanel } from "./components/AssistModePanel";
 
 import {
   getAudioCaptureStatus,
@@ -53,6 +57,12 @@ export default function App() {
     "start-backend" | "stop-backend" | "permissions" | "start-capture" | "stop-capture" | null
   >(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [assistState, dispatchAssist] = useReducer(assistReducer, initialAssistState);
+  const [assistEnabled, setAssistEnabled] = useState(true);
+  const [translationEnabled, setTranslationEnabled] = useState(true);
+  const [simplificationEnabled, setSimplificationEnabled] = useState(false);
+  const [simplificationLevel, setSimplificationLevel] = useState<"b1" | "b2">("b1");
+  const [replyCoachingEnabled, setReplyCoachingEnabled] = useState(true);
 
   useEffect(() => {
     let isMounted = true;
@@ -68,6 +78,31 @@ export default function App() {
       isMounted = false;
     };
   }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    let cleanup: (() => void) | undefined;
+    void subscribeToAssistEvents((action) => {
+      if (!disposed) dispatchAssist(action);
+    }).then((unsubscribe) => {
+      if (disposed) unsubscribe();
+      else cleanup = unsubscribe;
+    }).catch(() => {
+      if (!disposed) dispatchAssist({ type: "connection", status: "failed" });
+    });
+    return () => {
+      disposed = true;
+      cleanup?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (backendStatus?.status !== "ready" || liveStatus?.status === "disconnected") {
+      dispatchAssist({ type: "clear" });
+      return;
+    }
+    dispatchAssist({ type: "connection", status: liveStatus?.status === "session_active" ? "active" : "inactive" });
+  }, [backendStatus?.status, liveStatus?.status]);
 
   useEffect(() => {
     if (backendStatus?.status !== "ready") return;
@@ -251,6 +286,20 @@ export default function App() {
             </button>
           </div>
         </section>
+        <section className="assist-controls" aria-labelledby="assist-controls-title">
+          <h2 id="assist-controls-title">Assist configuration</h2>
+          <label><input type="checkbox" checked={assistEnabled} onChange={(event) => setAssistEnabled(event.target.checked)} /> Enable Assist Mode</label>
+          <label><input type="checkbox" checked={translationEnabled} disabled={!assistEnabled} onChange={(event) => setTranslationEnabled(event.target.checked)} /> Turkish translation</label>
+          <label><input type="checkbox" checked={simplificationEnabled} disabled={!assistEnabled} onChange={(event) => setSimplificationEnabled(event.target.checked)} /> German simplification</label>
+          <label>
+            Simplification level
+            <select value={simplificationLevel} disabled={!assistEnabled || !simplificationEnabled} onChange={(event) => setSimplificationLevel(event.target.value as "b1" | "b2")}>
+              <option value="b1">B1</option><option value="b2">B2</option>
+            </select>
+          </label>
+          <label><input type="checkbox" checked={replyCoachingEnabled} disabled={!assistEnabled} onChange={(event) => setReplyCoachingEnabled(event.target.checked)} /> Reply coaching</label>
+        </section>
+        {assistEnabled && <AssistModePanel state={assistState} />}
         {(errorMessage || backendStatus?.status === "failed" || captureStatus?.state === "failed") && (
           <p className="backend-error" role="alert">{errorMessage ?? "A local component is unavailable."}</p>
         )}

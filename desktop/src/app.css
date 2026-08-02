@@ -26,7 +26,7 @@ textarea {
 }
 
 .app-panel {
-  width: min(100%, 34rem);
+  width: min(100%, 46rem);
   padding: 2rem;
   border: 1px solid #d9e0ec;
   border-radius: 0.75rem;
@@ -64,6 +64,103 @@ textarea {
   margin-top: 2rem;
   padding-top: 1.5rem;
   border-top: 1px solid #d9e0ec;
+}
+
+.assist-controls,
+.assist-panel {
+  margin-top: 2rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid #d9e0ec;
+}
+
+.assist-controls {
+  display: grid;
+  gap: 0.7rem;
+}
+
+.assist-controls h2,
+.assist-panel h2 {
+  margin-top: 0;
+  font-size: 1.2rem;
+}
+
+.assist-controls label {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.assist-controls label:has(select) {
+  display: grid;
+  max-width: 12rem;
+}
+
+.transcript-list {
+  max-height: 22rem;
+  overflow-y: auto;
+  border: 1px solid #d9e0ec;
+  border-radius: 0.5rem;
+  background: #fbfcfe;
+}
+
+.transcript-row {
+  padding: 0.85rem 1rem;
+  border-bottom: 1px solid #e5eaf2;
+}
+
+.transcript-row:last-child {
+  border-bottom: 0;
+}
+
+.transcript-row header {
+  display: flex;
+  gap: 0.65rem;
+  color: #4c5b75;
+  font-size: 0.875rem;
+}
+
+.transcript-row p {
+  margin: 0.45rem 0 0;
+}
+
+.transcript-original {
+  color: #172033;
+}
+
+.assist-enrichment {
+  color: #254b83;
+}
+
+.assist-processing,
+.assist-unavailable {
+  color: #4c5b75;
+  font-size: 0.9rem;
+}
+
+.reply-suggestions {
+  margin-top: 1rem;
+}
+
+.reply-suggestions h3 {
+  margin-bottom: 0.5rem;
+}
+
+.reply-suggestions ol {
+  display: grid;
+  gap: 0.5rem;
+  margin: 0;
+  padding-left: 1.5rem;
+}
+
+.reply-suggestions li {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.reply-suggestions small {
+  color: #4c5b75;
+  text-transform: capitalize;
 }
 
 .capture-panel h2 {
