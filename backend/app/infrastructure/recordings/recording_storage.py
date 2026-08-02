@@ -1,6 +1,7 @@
 """Filesystem-private encrypted recording storage."""
 
 import shutil
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
@@ -10,6 +11,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from app.application.dto.recordings import (
     RecordingKeyReference,
+    RecordingMetadataRecord,
     RecordingSegmentDescriptor,
 )
 from app.application.exceptions import (
@@ -40,12 +42,16 @@ class EncryptedRecordingStorage:
         key_store: RecordingKeyStore,
         *,
         maximum_plaintext_bytes: int = 64 * 1024 * 1024,
+        metadata_resolver: (
+            Callable[[UUID], Awaitable[RecordingMetadataRecord]] | None
+        ) = None,
     ) -> None:
         if maximum_plaintext_bytes <= 0:
             raise ValueError("maximum_plaintext_bytes must be positive")
         self._root = root
         self._key_store = key_store
         self._maximum_plaintext_bytes = maximum_plaintext_bytes
+        self._metadata_resolver = metadata_resolver
         self._tokens: dict[UUID, str] = {}
 
     def configure_recording(
@@ -66,6 +72,7 @@ class EncryptedRecordingStorage:
         segment_index: int,
         key_reference: RecordingKeyReference,
     ) -> EncryptedRecordingSegmentWriter:
+        await self._ensure_configured(recording_id)
         if segment_index < 0:
             raise RecordingSegmentLifecycleError()
         final_path = self._directory(recording_id) / f"segment-{segment_index:06d}.amcr"
@@ -81,6 +88,7 @@ class EncryptedRecordingStorage:
     async def list_segments(
         self, recording_id: UUID
     ) -> tuple[RecordingSegmentDescriptor, ...]:
+        await self._ensure_configured(recording_id)
         directory = self._directory(recording_id)
         if not directory.exists():
             return ()
@@ -106,6 +114,7 @@ class EncryptedRecordingStorage:
         segment_index: int,
         key_reference: RecordingKeyReference,
     ) -> bytes:
+        await self._ensure_configured(recording_id)
         if segment_index < 0:
             raise RecordingSegmentNotFoundError()
         path = self._directory(recording_id) / f"segment-{segment_index:06d}.amcr"
@@ -123,10 +132,21 @@ class EncryptedRecordingStorage:
             raise RecordingSegmentAuthenticationError() from error
 
     async def delete_recording(self, recording_id: UUID) -> None:
+        await self._ensure_configured(recording_id)
         shutil.rmtree(self._directory(recording_id), ignore_errors=True)
 
     async def recording_exists(self, recording_id: UUID) -> bool:
+        await self._ensure_configured(recording_id)
         return self._directory(recording_id).is_dir()
+
+    async def _ensure_configured(self, recording_id: UUID) -> None:
+        if recording_id in self._tokens:
+            return
+        resolver = self._metadata_resolver
+        if resolver is None:
+            raise RecordingStorageUnavailableError()
+        record = await resolver(recording_id)
+        self.configure_recording(recording_id, record.storage_directory_token)
 
     def _directory(self, recording_id: UUID) -> Path:
         try:

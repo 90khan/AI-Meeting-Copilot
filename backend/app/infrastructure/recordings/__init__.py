@@ -3,6 +3,13 @@
 from app.infrastructure.recordings.keychain_key_store import (
     MacOSKeychainRecordingKeyStore,
 )
+from app.infrastructure.recordings.recording_metadata_resolver import (
+    RecordingStorageMetadataResolver,
+)
 from app.infrastructure.recordings.recording_storage import EncryptedRecordingStorage
 
-__all__ = ["EncryptedRecordingStorage", "MacOSKeychainRecordingKeyStore"]
+__all__ = [
+    "EncryptedRecordingStorage",
+    "MacOSKeychainRecordingKeyStore",
+    "RecordingStorageMetadataResolver",
+]

@@ -2,12 +2,14 @@
 
 import logging
 from contextlib import suppress
+from datetime import UTC, datetime
 
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.application.dto import AudioSource
 from app.application.dto.ai import LanguageCode
+from app.application.dto.recordings import RecordingCleanupResult
 from app.application.exceptions import ProviderUnavailableError
 from app.application.interfaces import (
     GermanSimplificationProvider,
@@ -27,19 +29,24 @@ from app.application.services import (
     AssistModeConfiguration,
     AssistModeOrchestrator,
     AssistUpdateSink,
+    RecordingRetentionCleanupService,
+    RecordingStorageReconciler,
     TranscriptDeduplicator,
 )
 from app.application.use_cases import (
     AddTranscriptUseCase,
     CreateMeetingUseCase,
+    DeleteMeetingAudioUseCase,
     EndMeetingUseCase,
     GenerateReplySuggestionsUseCase,
     ProcessLiveAudioChunkUseCase,
+    ReconcileRecordingStorageUseCase,
     RenameMeetingUseCase,
     SimplifyTranscriptSegmentUseCase,
     StartLiveTranscriptionSessionUseCase,
     StartMeetingUseCase,
     TranslateTranscriptSegmentUseCase,
+    UpdateAudioRetentionUseCase,
 )
 from app.core.config import Settings
 from app.core.logging import get_logger, setup_logging
@@ -62,6 +69,11 @@ from app.infrastructure.providers.ollama import (
     OllamaMeetingSummarizationProvider,
     OllamaReplyCoachingProvider,
     OllamaTranslationProvider,
+)
+from app.infrastructure.recordings import (
+    EncryptedRecordingStorage,
+    MacOSKeychainRecordingKeyStore,
+    RecordingStorageMetadataResolver,
 )
 
 
@@ -97,6 +109,8 @@ class Container:
             MeetingSummarizationProvider | None
         ) = None
         self._sidecar_token_validator: SidecarTokenValidator | None = None
+        self._recording_key_store: MacOSKeychainRecordingKeyStore | None = None
+        self._recording_storage: EncryptedRecordingStorage | None = None
         self._is_started = False
         setup_logging(settings)
 
@@ -110,6 +124,7 @@ class Container:
         self._engine = engine
         self._session_factory = create_session_factory(engine)
         try:
+            self._configure_recording_resources()
             self._configure_speech_to_text_provider()
             self._configure_ollama_providers()
         except Exception:
@@ -129,6 +144,8 @@ class Container:
             self._faster_whisper_speech_to_text_provider = None
             self._faster_whisper_model_manager = None
             self._sidecar_token_validator = None
+            self._recording_storage = None
+            self._recording_key_store = None
             try:
                 try:
                     await self._dispose_ollama_resources()
@@ -283,6 +300,82 @@ class Container:
         """Create an independent Unit of Work from active persistence resources."""
 
         return SQLAlchemyUnitOfWork(self._require_session_factory())
+
+    def get_recording_key_store(self) -> MacOSKeychainRecordingKeyStore:
+        """Return the lifecycle-owned lightweight Keychain adapter."""
+
+        self._require_started()
+        if self._recording_key_store is None:
+            raise RuntimeError("Recording infrastructure is not configured.")
+        return self._recording_key_store
+
+    def get_recording_storage(self) -> EncryptedRecordingStorage:
+        """Return the lifecycle-owned lightweight encrypted storage adapter."""
+
+        self._require_started()
+        if self._recording_storage is None:
+            raise RuntimeError("Recording infrastructure is not configured.")
+        return self._recording_storage
+
+    def get_recording_retention_cleanup_service(
+        self,
+    ) -> RecordingRetentionCleanupService:
+        """Create one explicit retention-cleanup service."""
+
+        self._require_started()
+        return RecordingRetentionCleanupService(
+            unit_of_work_factory=self.get_unit_of_work,
+            recording_storage=self.get_recording_storage(),
+            recording_key_store=self.get_recording_key_store(),
+            clock=_utc_now,
+        )
+
+    def get_reconcile_recording_storage_use_case(
+        self,
+    ) -> ReconcileRecordingStorageUseCase:
+        """Create one explicit recording-storage reconciliation use case."""
+
+        self._require_started()
+        return ReconcileRecordingStorageUseCase(
+            RecordingStorageReconciler(
+                unit_of_work_factory=self.get_unit_of_work,
+                recording_storage=self.get_recording_storage(),
+                recording_key_store=self.get_recording_key_store(),
+                clock=_utc_now,
+            )
+        )
+
+    def get_delete_meeting_audio_use_case(self) -> DeleteMeetingAudioUseCase:
+        """Create one immediate local Meeting-audio deletion use case."""
+
+        self._require_started()
+        return DeleteMeetingAudioUseCase(
+            unit_of_work_factory=self.get_unit_of_work,
+            recording_storage=self.get_recording_storage(),
+            recording_key_store=self.get_recording_key_store(),
+            clock=_utc_now,
+        )
+
+    def get_update_audio_retention_use_case(self) -> UpdateAudioRetentionUseCase:
+        """Create one recording retention-update use case."""
+
+        self._require_started()
+        return UpdateAudioRetentionUseCase(
+            unit_of_work_factory=self.get_unit_of_work,
+            clock=_utc_now,
+        )
+
+    async def run_recording_retention_cleanup_once(self) -> RecordingCleanupResult:
+        """Run retention cleanup once; no background scheduler is created."""
+
+        self._require_started()
+        return await self.get_recording_retention_cleanup_service().run_once()
+
+    async def run_recording_storage_reconciliation_once(self) -> RecordingCleanupResult:
+        """Run storage reconciliation once; no background scheduler is created."""
+
+        self._require_started()
+        return await self.get_reconcile_recording_storage_use_case().execute()
 
     def get_create_meeting_use_case(self) -> CreateMeetingUseCase:
         """Create a Unit-of-Work-backed Meeting creation use case."""
@@ -444,6 +537,19 @@ class Container:
             )
         )
 
+    def _configure_recording_resources(self) -> None:
+        """Create adapters only; external operations remain explicitly invoked."""
+
+        key_store = MacOSKeychainRecordingKeyStore()
+        resolver = RecordingStorageMetadataResolver(self.get_unit_of_work)
+        self._recording_key_store = key_store
+        self._recording_storage = EncryptedRecordingStorage(
+            root=self._settings.recordings_root_directory,
+            key_store=key_store,
+            maximum_plaintext_bytes=self._settings.recording_segment_max_plaintext_bytes,
+            metadata_resolver=resolver.resolve,
+        )
+
     def _configure_ollama_providers(self) -> None:
         """Configure selected Ollama capability adapters for this lifecycle."""
 
@@ -540,6 +646,8 @@ class Container:
             self._faster_whisper_speech_to_text_provider = None
             self._faster_whisper_model_manager = None
             self._sidecar_token_validator = None
+            self._recording_storage = None
+            self._recording_key_store = None
             self._dispose_persistence_resources()
 
     async def _dispose_ollama_resources(self) -> None:
@@ -574,3 +682,9 @@ class Container:
             raise RuntimeError(
                 "AI provider factories cannot change after container start."
             )
+
+
+def _utc_now() -> datetime:
+    """Return the explicit UTC clock used by recording maintenance factories."""
+
+    return datetime.now(UTC)

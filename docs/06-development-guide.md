@@ -212,6 +212,14 @@ Every feature should follow these steps.
 8. Verify manually.
 9. Submit PR.
 
+## Recording Maintenance Startup Policy
+
+Desktop startup will explicitly start the sidecar/container, run recording
+storage reconciliation once, then run retention cleanup once before continuing
+normal startup. Automatic scheduling is deliberately deferred until the desktop
+command boundary owns its lifecycle; the backend does not start a maintenance
+loop on its own.
+
 ---
 
 # Module Ownership

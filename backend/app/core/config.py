@@ -36,6 +36,8 @@ class Settings(BaseSettings):
     debug: bool = False
     log_level: str = "INFO"
     database_url: str = "sqlite+pysqlite:///./data/app.db"
+    recordings_root_directory: Path = Path("./data/recordings")
+    recording_segment_max_plaintext_bytes: int = 67_108_864
     speech_to_text_provider: str = "unconfigured"
     translation_provider: str = "unconfigured"
     german_simplification_provider: str = "unconfigured"
@@ -131,6 +133,22 @@ class Settings(BaseSettings):
         if value is None or (isinstance(value, str) and not value.strip()):
             return None
         return Path(value).expanduser().resolve()
+
+    @field_validator("recordings_root_directory", mode="before")
+    @classmethod
+    def normalize_recordings_root_directory(cls, value: Path | str) -> Path:
+        """Resolve local recording storage without creating it."""
+
+        return Path(value).expanduser().resolve()
+
+    @field_validator("recording_segment_max_plaintext_bytes")
+    @classmethod
+    def validate_recording_segment_max_plaintext_bytes(cls, value: int) -> int:
+        """Require a positive encrypted-recording segment limit."""
+
+        if value <= 0:
+            raise ValueError("Recording segment limit must be greater than zero.")
+        return value
 
     @field_validator("ollama_base_url", mode="before")
     @classmethod
