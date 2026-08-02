@@ -12,12 +12,14 @@ from app.application.interfaces.ai import (
     TranslationProvider,
     TranslationProviderFactory,
 )
+from app.application.interfaces.live_transcription import LiveTranscriptionSession
 from app.application.interfaces.unit_of_work import UnitOfWork
 from app.application.interfaces.unit_of_work_factory import UnitOfWorkFactory
 
 __all__ = [
     "GermanSimplificationProvider",
     "GermanSimplificationProviderFactory",
+    "LiveTranscriptionSession",
     "MeetingSummarizationProvider",
     "MeetingSummarizationProviderFactory",
     "ReplyCoachingProvider",
