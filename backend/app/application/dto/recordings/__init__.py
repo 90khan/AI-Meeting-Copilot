@@ -1,5 +1,9 @@
 """Recording metadata DTOs."""
 
+from app.application.dto.recordings.encryption import (
+    RecordingEncryptionKey,
+    RecordingKeyReference,
+)
 from app.application.dto.recordings.recording import (
     RecordingDeletionStatus,
     RecordingMetadata,
@@ -22,6 +26,8 @@ __all__ = [
     "PrepareRecordingSessionCommand",
     "PrepareRecordingSessionResult",
     "RecordingDeletionStatus",
+    "RecordingEncryptionKey",
+    "RecordingKeyReference",
     "RecordingMetadata",
     "RecordingMetadataRecord",
     "RecordingRetentionPolicy",

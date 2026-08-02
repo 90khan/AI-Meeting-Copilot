@@ -25,6 +25,8 @@ from app.application.dto.process_live_audio_chunk_command import (
 )
 from app.application.dto.recordings import (
     RecordingDeletionStatus,
+    RecordingEncryptionKey,
+    RecordingKeyReference,
     RecordingMetadata,
     RecordingMetadataRecord,
     RecordingRetentionPolicy,
@@ -56,6 +58,8 @@ __all__ = [
     "ProcessLiveAudioChunkCommand",
     "ProcessedTranscriptSegment",
     "RecordingDeletionStatus",
+    "RecordingEncryptionKey",
+    "RecordingKeyReference",
     "RecordingMetadata",
     "RecordingMetadataRecord",
     "RecordingRetentionPolicy",

@@ -1,6 +1,7 @@
 """Prepare opt-in recording metadata without starting audio capture."""
 
 from collections.abc import Callable
+from contextlib import suppress
 from datetime import datetime, timedelta
 from uuid import UUID
 
@@ -14,7 +15,7 @@ from app.application.dto.recordings import (
     RecordingState,
 )
 from app.application.exceptions import ApplicationValidationError
-from app.application.interfaces import UnitOfWorkFactory
+from app.application.interfaces import RecordingKeyStore, UnitOfWorkFactory
 from app.domain.exceptions import InvalidStateTransitionError
 from app.domain.value_objects import MeetingStatus
 
@@ -25,10 +26,12 @@ class PrepareRecordingSessionUseCase:
     def __init__(
         self,
         unit_of_work_factory: UnitOfWorkFactory,
+        recording_key_store: RecordingKeyStore,
         clock: Callable[[], datetime],
         uuid_factory: Callable[[], UUID],
     ) -> None:
         self._unit_of_work_factory = unit_of_work_factory
+        self._recording_key_store = recording_key_store
         self._clock = clock
         self._uuid_factory = uuid_factory
 
@@ -65,6 +68,7 @@ class PrepareRecordingSessionUseCase:
                     "A recording is already active for this Meeting."
                 )
             recording_id = self._uuid_factory()
+            key_reference = await self._recording_key_store.create_key(recording_id)
             expires_at = command.retention_policy.expires_at(created_at)
             deletion_status = (
                 RecordingDeletionStatus.NOT_SCHEDULED
@@ -90,15 +94,20 @@ class PrepareRecordingSessionUseCase:
                 segment_count=0,
                 has_gaps=False,
             )
-            await unit_of_work.recordings.save(
-                RecordingMetadataRecord(
-                    metadata=metadata,
-                    storage_directory_token=str(self._uuid_factory()),
-                    key_reference="pending_key_assignment",
-                    current_segment_index=0,
+            try:
+                await unit_of_work.recordings.save(
+                    RecordingMetadataRecord(
+                        metadata=metadata,
+                        storage_directory_token=str(self._uuid_factory()),
+                        key_reference=key_reference.value,
+                        current_segment_index=0,
+                    )
                 )
-            )
-            await unit_of_work.commit()
+                await unit_of_work.commit()
+            except Exception:
+                with suppress(Exception):
+                    await self._recording_key_store.delete_key(key_reference)
+                raise
         return PrepareRecordingSessionResult(
             enabled=True,
             recording_id=recording_id,

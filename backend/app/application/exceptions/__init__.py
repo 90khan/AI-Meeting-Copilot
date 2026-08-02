@@ -8,6 +8,13 @@ from app.application.exceptions.provider_errors import (
     ProviderTimeoutError,
     ProviderUnavailableError,
 )
+from app.application.exceptions.recording_key_errors import (
+    RecordingKeyAccessDeniedError,
+    RecordingKeyInvalidDataError,
+    RecordingKeyNotFoundError,
+    RecordingKeyStoreError,
+    RecordingKeyUnavailableError,
+)
 from app.application.exceptions.validation import ApplicationValidationError
 
 __all__ = [
@@ -18,4 +25,9 @@ __all__ = [
     "ProviderRateLimitError",
     "ProviderTimeoutError",
     "ProviderUnavailableError",
+    "RecordingKeyAccessDeniedError",
+    "RecordingKeyInvalidDataError",
+    "RecordingKeyNotFoundError",
+    "RecordingKeyStoreError",
+    "RecordingKeyUnavailableError",
 ]

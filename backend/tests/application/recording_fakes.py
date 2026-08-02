@@ -10,6 +10,7 @@ from app.application.dto.recordings import (
     RecordingRetentionPolicy,
     RecordingState,
 )
+from app.application.dto.recordings.encryption import RecordingKeyReference
 from app.domain.entities import Meeting
 from app.domain.value_objects import MeetingId
 
@@ -86,6 +87,22 @@ class FakeUnitOfWorkFactory:
     def __call__(self) -> FakeUnitOfWork:
         self.calls += 1
         return self.unit_of_work
+
+
+class FakeRecordingKeyStore:
+    def __init__(self, error: Exception | None = None) -> None:
+        self.error = error
+        self.created: list[UUID] = []
+        self.deleted: list[RecordingKeyReference] = []
+
+    async def create_key(self, recording_id: UUID) -> RecordingKeyReference:
+        if self.error is not None:
+            raise self.error
+        self.created.append(recording_id)
+        return RecordingKeyReference(value="a" * 24)
+
+    async def delete_key(self, reference: RecordingKeyReference) -> None:
+        self.deleted.append(reference)
 
 
 def recording_record(
