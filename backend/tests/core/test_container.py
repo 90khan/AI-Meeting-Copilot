@@ -3,6 +3,8 @@
 import asyncio
 
 import pytest
+from app.application.dto import AudioSource
+from app.application.dto.ai import LanguageCode
 from app.application.use_cases import (
     AddTranscriptUseCase,
     CreateMeetingUseCase,
@@ -14,6 +16,7 @@ from app.application.use_cases import (
 )
 from app.core.config import Settings
 from app.core.container import Container
+from app.domain.value_objects import MeetingId
 from app.infrastructure.audio import BufferedLiveTranscriptionSession
 
 
@@ -140,7 +143,11 @@ def test_use_case_factories_raise_before_start() -> None:
     with pytest.raises(RuntimeError, match="has not been started"):
         container.get_process_live_audio_chunk_use_case()
     with pytest.raises(RuntimeError, match="has not been started"):
-        container.get_live_transcription_session()
+        container.get_live_transcription_session(
+            meeting_id=MeetingId.new(),
+            language_hint=None,
+            source=AudioSource.MIXED,
+        )
     with pytest.raises(RuntimeError, match="has not been started"):
         container.get_start_live_transcription_session_use_case()
     with pytest.raises(RuntimeError, match="has not been started"):
@@ -177,11 +184,24 @@ def test_live_transcription_session_factory_returns_independent_sessions() -> No
     asyncio.run(container.start())
 
     try:
-        first_session = container.get_live_transcription_session()
-        second_session = container.get_live_transcription_session()
+        meeting_id = MeetingId.new()
+        language_hint = LanguageCode(value="de-DE")
+        first_session = container.get_live_transcription_session(
+            meeting_id=meeting_id,
+            language_hint=language_hint,
+            source=AudioSource.SYSTEM_AUDIO,
+        )
+        second_session = container.get_live_transcription_session(
+            meeting_id=meeting_id,
+            language_hint=language_hint,
+            source=AudioSource.SYSTEM_AUDIO,
+        )
 
         assert isinstance(first_session, BufferedLiveTranscriptionSession)
         assert isinstance(second_session, BufferedLiveTranscriptionSession)
         assert first_session is not second_session
+        assert first_session.meeting_id == meeting_id
+        assert first_session.language_hint == language_hint
+        assert first_session.source is AudioSource.SYSTEM_AUDIO
     finally:
         asyncio.run(container.stop())

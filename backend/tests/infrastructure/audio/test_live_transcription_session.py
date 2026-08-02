@@ -12,12 +12,15 @@ from app.application.dto import (
     LiveTranscriptionStatusKind,
     ProcessedTranscriptSegment,
 )
-from app.application.dto.ai import AudioFormat, AudioInput
+from app.application.dto.ai import AudioFormat, AudioInput, LanguageCode
+from app.application.exceptions import ApplicationValidationError
 from app.domain.value_objects import MeetingId
 from app.infrastructure.audio import (
     BoundedAudioChunkBuffer,
     BufferedLiveTranscriptionSession,
 )
+
+_MEETING_ID = MeetingId.new()
 
 
 class FakeProcessor:
@@ -42,9 +45,14 @@ class FakeProcessor:
         return outcome
 
 
-def _chunk(sequence: int) -> CapturedAudioChunk:
+def _chunk(
+    sequence: int,
+    *,
+    meeting_id: MeetingId = _MEETING_ID,
+    source: AudioSource = AudioSource.MIXED,
+) -> CapturedAudioChunk:
     return CapturedAudioChunk(
-        meeting_id=MeetingId.new(),
+        meeting_id=meeting_id,
         sequence=sequence,
         capture_started_at=datetime.now(UTC),
         audio=AudioInput(
@@ -53,7 +61,7 @@ def _chunk(sequence: int) -> CapturedAudioChunk:
             channels=1,
             audio_format=AudioFormat.WAV,
         ),
-        source=AudioSource.MIXED,
+        source=source,
     )
 
 
@@ -82,11 +90,17 @@ def _session(
     outcomes: list[LiveTranscriptionChunkResult | Exception],
     *,
     max_size: int = 3,
+    meeting_id: MeetingId = _MEETING_ID,
+    language_hint: LanguageCode | None = None,
+    source: AudioSource = AudioSource.MIXED,
 ) -> tuple[BufferedLiveTranscriptionSession, BoundedAudioChunkBuffer, FakeProcessor]:
     buffer = BoundedAudioChunkBuffer(max_size=max_size)
     processor = FakeProcessor(outcomes)
     return (
         BufferedLiveTranscriptionSession(
+            meeting_id=meeting_id,
+            language_hint=language_hint,
+            source=source,
             buffer=buffer,
             processor=processor,  # type: ignore[arg-type]
         ),
@@ -108,7 +122,52 @@ def test_active_session_processes_one_chunk_and_updates_previous_text() -> None:
     assert returned_result is result
     assert command.chunk is chunk  # type: ignore[attr-defined]
     assert command.previous_accepted_text is None  # type: ignore[attr-defined]
+    assert command.language_hint is None  # type: ignore[attr-defined]
     assert session._previous_accepted_text == "Second"
+
+
+def test_session_exposes_immutable_configuration_and_forwards_language_hint() -> None:
+    """Configured Meeting, source, and language hint apply to every chunk command."""
+
+    language_hint = LanguageCode(value="de-DE")
+    session, _, processor = _session(
+        [_result(0), _result(1)], language_hint=language_hint
+    )
+
+    asyncio.run(session.process_chunk(_chunk(0)))
+    asyncio.run(session.process_chunk(_chunk(1)))
+
+    assert session.meeting_id == _MEETING_ID
+    assert session.language_hint == language_hint
+    assert session.source is AudioSource.MIXED
+    assert [command.language_hint for command in processor.commands] == [  # type: ignore[attr-defined]
+        language_hint,
+        language_hint,
+    ]
+
+
+def test_session_rejects_chunks_for_another_meeting_before_buffering() -> None:
+    """A session cannot receive audio belonging to a different Meeting."""
+
+    session, buffer, processor = _session([])
+
+    with pytest.raises(ApplicationValidationError, match="Meeting ID"):
+        asyncio.run(session.process_chunk(_chunk(0, meeting_id=MeetingId.new())))
+
+    assert buffer.size == 0
+    assert processor.commands == []
+
+
+def test_session_rejects_chunks_for_another_source_before_buffering() -> None:
+    """A session cannot accept a per-chunk source override."""
+
+    session, buffer, processor = _session([])
+
+    with pytest.raises(ApplicationValidationError, match="source"):
+        asyncio.run(session.process_chunk(_chunk(0, source=AudioSource.MICROPHONE)))
+
+    assert buffer.size == 0
+    assert processor.commands == []
 
 
 def test_session_preserves_fifo_order_for_prebuffered_chunks() -> None:

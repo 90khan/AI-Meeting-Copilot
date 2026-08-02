@@ -6,10 +6,13 @@ from contextlib import suppress
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.application.dto import AudioSource
+from app.application.dto.ai import LanguageCode
 from app.application.exceptions import ProviderUnavailableError
 from app.application.interfaces import (
     GermanSimplificationProvider,
     GermanSimplificationProviderFactory,
+    LiveTranscriptionSession,
     MeetingSummarizationProvider,
     MeetingSummarizationProviderFactory,
     ReplyCoachingProvider,
@@ -33,6 +36,7 @@ from app.application.use_cases import (
 from app.core.config import Settings
 from app.core.logging import get_logger, setup_logging
 from app.core.sidecar_auth import SidecarTokenValidator
+from app.domain.value_objects import MeetingId
 from app.infrastructure.audio import (
     BoundedAudioChunkBuffer,
     BufferedLiveTranscriptionSession,
@@ -296,11 +300,20 @@ class Container:
             add_transcript_use_case=self.get_add_transcript_use_case(),
         )
 
-    def get_live_transcription_session(self) -> BufferedLiveTranscriptionSession:
+    def get_live_transcription_session(
+        self,
+        *,
+        meeting_id: MeetingId,
+        language_hint: LanguageCode | None,
+        source: AudioSource,
+    ) -> LiveTranscriptionSession:
         """Create one independent buffered live-transcription session."""
 
         self._require_session_factory()
         return BufferedLiveTranscriptionSession(
+            meeting_id=meeting_id,
+            language_hint=language_hint,
+            source=source,
             buffer=BoundedAudioChunkBuffer(max_size=3),
             processor=self.get_process_live_audio_chunk_use_case(),
         )
