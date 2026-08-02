@@ -5,8 +5,8 @@ payloads out of application code.  Production hosts provide the seam; tests use
 an in-memory fake and never handle a real Keychain item.
 """
 
+import platform
 import secrets
-import sys
 from typing import NoReturn, Protocol
 from uuid import UUID
 
@@ -62,12 +62,23 @@ class _MacOSSecurityFramework(_UnavailableSecurityFramework):
     """
 
 
-def _create_native_security_framework() -> _SecurityFramework:
+def _current_platform() -> str:
+    """Return the host platform through a testable runtime seam."""
+
+    return platform.system()
+
+
+def _create_native_security_framework(
+    *, platform_name: str | None = None
+) -> _SecurityFramework:
     """Select a platform-safe native security implementation."""
 
-    if sys.platform != "darwin":
-        return _UnavailableSecurityFramework()
-    return _MacOSSecurityFramework()
+    resolved_platform = (
+        platform_name if platform_name is not None else _current_platform()
+    )
+    if resolved_platform == "Darwin":
+        return _MacOSSecurityFramework()
+    return _UnavailableSecurityFramework()
 
 
 class MacOSKeychainRecordingKeyStore:
@@ -82,7 +93,7 @@ class MacOSKeychainRecordingKeyStore:
         self._native: _SecurityFramework = (
             native if native is not None else _create_native_security_framework()
         )
-        if sys.platform != "darwin":
+        if _current_platform() != "Darwin":
             raise RecordingKeyUnavailableError("Recording key storage is unsupported.")
 
     async def create_key(self, recording_id: UUID) -> RecordingKeyReference:
