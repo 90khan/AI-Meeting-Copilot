@@ -13,6 +13,7 @@ from app.application.use_cases import (
 )
 from app.core.config import Settings
 from app.core.container import Container
+from app.infrastructure.audio import BufferedLiveTranscriptionSession
 
 
 def test_start_creates_an_engine_and_session_factory() -> None:
@@ -134,6 +135,8 @@ def test_use_case_factories_raise_before_start() -> None:
     with pytest.raises(RuntimeError, match="has not been started"):
         container.get_process_live_audio_chunk_use_case()
     with pytest.raises(RuntimeError, match="has not been started"):
+        container.get_live_transcription_session()
+    with pytest.raises(RuntimeError, match="has not been started"):
         container.get_start_meeting_use_case()
     with pytest.raises(RuntimeError, match="has not been started"):
         container.get_rename_meeting_use_case()
@@ -153,5 +156,23 @@ def test_live_audio_chunk_factory_works_with_registered_speech_provider() -> Non
             container.get_process_live_audio_chunk_use_case(),
             ProcessLiveAudioChunkUseCase,
         )
+    finally:
+        asyncio.run(container.stop())
+
+
+def test_live_transcription_session_factory_returns_independent_sessions() -> None:
+    """Each resolver call creates a new active live-transcription session."""
+
+    container = Container(Settings(database_url="sqlite+pysqlite:///:memory:"))
+    container.register_speech_to_text_provider_factory(lambda: object())  # type: ignore[arg-type]
+    asyncio.run(container.start())
+
+    try:
+        first_session = container.get_live_transcription_session()
+        second_session = container.get_live_transcription_session()
+
+        assert isinstance(first_session, BufferedLiveTranscriptionSession)
+        assert isinstance(second_session, BufferedLiveTranscriptionSession)
+        assert first_session is not second_session
     finally:
         asyncio.run(container.stop())

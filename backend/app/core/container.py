@@ -31,6 +31,10 @@ from app.application.use_cases import (
 )
 from app.core.config import Settings
 from app.core.logging import get_logger, setup_logging
+from app.infrastructure.audio import (
+    BoundedAudioChunkBuffer,
+    BufferedLiveTranscriptionSession,
+)
 from app.infrastructure.database.engine import create_engine_from_settings
 from app.infrastructure.database.session import create_session_factory
 from app.infrastructure.persistence.sqlalchemy import SQLAlchemyUnitOfWork
@@ -268,6 +272,15 @@ class Container:
             speech_to_text_provider=self.get_speech_to_text_provider(),
             transcript_deduplicator=TranscriptDeduplicator(),
             add_transcript_use_case=self.get_add_transcript_use_case(),
+        )
+
+    def get_live_transcription_session(self) -> BufferedLiveTranscriptionSession:
+        """Create one independent buffered live-transcription session."""
+
+        self._require_session_factory()
+        return BufferedLiveTranscriptionSession(
+            buffer=BoundedAudioChunkBuffer(max_size=3),
+            processor=self.get_process_live_audio_chunk_use_case(),
         )
 
     def get_start_meeting_use_case(self) -> StartMeetingUseCase:
