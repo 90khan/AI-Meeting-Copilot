@@ -5,6 +5,10 @@ from app.application.dto.recordings.cleanup import (
     RecordingCleanupOutcome,
     RecordingCleanupResult,
 )
+from app.application.dto.recordings.deletion import (
+    DeleteMeetingAudioCommand,
+    DeleteMeetingAudioResult,
+)
 from app.application.dto.recordings.encryption import (
     RecordingEncryptionKey,
     RecordingKeyReference,
@@ -23,9 +27,15 @@ from app.application.dto.recordings.recording_session import (
     PrepareRecordingSessionResult,
 )
 from app.application.dto.recordings.retention import RecordingRetentionPolicy
+from app.application.dto.recordings.retention_update import (
+    UpdateAudioRetentionCommand,
+    UpdateAudioRetentionResult,
+)
 from app.application.dto.recordings.storage import RecordingSegmentDescriptor
 
 __all__ = [
+    "DeleteMeetingAudioCommand",
+    "DeleteMeetingAudioResult",
     "FinalizeRecordingCommand",
     "MarkRecordingFailedCommand",
     "MarkRecordingStartedCommand",
@@ -42,4 +52,6 @@ __all__ = [
     "RecordingRetentionPolicy",
     "RecordingSegmentDescriptor",
     "RecordingState",
+    "UpdateAudioRetentionCommand",
+    "UpdateAudioRetentionResult",
 ]
