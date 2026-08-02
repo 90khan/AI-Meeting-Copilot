@@ -50,6 +50,15 @@ class SQLAlchemyRecordingRepository(RecordingRepository):
         model = self._session.scalar(statement)
         return None if model is None else self._to_record(model)
 
+    async def list_all(self) -> tuple[RecordingMetadataRecord, ...]:
+        statement = select(RecordingMetadataModel).order_by(
+            RecordingMetadataModel.created_at,
+            RecordingMetadataModel.recording_id,
+        )
+        return tuple(
+            self._to_record(model) for model in self._session.scalars(statement)
+        )
+
     async def list_expired(
         self, as_of: datetime
     ) -> tuple[RecordingMetadataRecord, ...]:

@@ -56,6 +56,17 @@ class FakeRecordingRepository:
             None,
         )
 
+    async def list_all(self) -> tuple[RecordingMetadataRecord, ...]:
+        return tuple(
+            sorted(
+                self.records.values(),
+                key=lambda record: (
+                    record.metadata.created_at,
+                    record.metadata.recording_id,
+                ),
+            )
+        )
+
 
 class FakeUnitOfWork:
     def __init__(

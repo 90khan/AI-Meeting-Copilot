@@ -16,6 +16,9 @@ from app.application.use_cases.prepare_recording_session import (
 from app.application.use_cases.process_live_audio_chunk import (
     ProcessLiveAudioChunkUseCase,
 )
+from app.application.use_cases.reconcile_recording_storage import (
+    ReconcileRecordingStorageUseCase,
+)
 from app.application.use_cases.rename_meeting import RenameMeetingUseCase
 from app.application.use_cases.simplify_transcript_segment import (
     SimplifyTranscriptSegmentUseCase,
@@ -40,6 +43,7 @@ __all__ = [
     "MarkRecordingStartedUseCase",
     "PrepareRecordingSessionUseCase",
     "ProcessLiveAudioChunkUseCase",
+    "ReconcileRecordingStorageUseCase",
     "RenameMeetingUseCase",
     "SimplifyTranscriptSegmentUseCase",
     "StartLiveTranscriptionSessionUseCase",
