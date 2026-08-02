@@ -1,6 +1,8 @@
 """Application composition root."""
 
 import logging
+import platform
+from collections.abc import Callable
 from contextlib import suppress
 from datetime import UTC, datetime
 
@@ -17,6 +19,7 @@ from app.application.interfaces import (
     LiveTranscriptionSession,
     MeetingSummarizationProvider,
     MeetingSummarizationProviderFactory,
+    RecordingKeyStore,
     ReplyCoachingProvider,
     ReplyCoachingProviderFactory,
     SpeechToTextProvider,
@@ -74,15 +77,23 @@ from app.infrastructure.recordings import (
     EncryptedRecordingStorage,
     MacOSKeychainRecordingKeyStore,
     RecordingStorageMetadataResolver,
+    UnavailableRecordingKeyStore,
 )
 
 
 class Container:
     """Explicitly wire application dependencies and manage their lifecycle."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        recording_key_store_factory: Callable[[], RecordingKeyStore] | None = None,
+    ) -> None:
         """Create a container using the supplied immutable application settings."""
-
+        self._recording_key_store_factory = (
+            recording_key_store_factory or _create_recording_key_store
+        )
         self._settings = settings
         self._engine: Engine | None = None
         self._session_factory: sessionmaker[Session] | None = None
@@ -109,7 +120,7 @@ class Container:
             MeetingSummarizationProvider | None
         ) = None
         self._sidecar_token_validator: SidecarTokenValidator | None = None
-        self._recording_key_store: MacOSKeychainRecordingKeyStore | None = None
+        self._recording_key_store: RecordingKeyStore | None = None
         self._recording_storage: EncryptedRecordingStorage | None = None
         self._is_started = False
         setup_logging(settings)
@@ -301,7 +312,7 @@ class Container:
 
         return SQLAlchemyUnitOfWork(self._require_session_factory())
 
-    def get_recording_key_store(self) -> MacOSKeychainRecordingKeyStore:
+    def get_recording_key_store(self) -> RecordingKeyStore:
         """Return the lifecycle-owned lightweight Keychain adapter."""
 
         self._require_started()
@@ -540,7 +551,7 @@ class Container:
     def _configure_recording_resources(self) -> None:
         """Create adapters only; external operations remain explicitly invoked."""
 
-        key_store = MacOSKeychainRecordingKeyStore()
+        key_store = self._recording_key_store_factory()
         resolver = RecordingStorageMetadataResolver(self.get_unit_of_work)
         self._recording_key_store = key_store
         self._recording_storage = EncryptedRecordingStorage(
@@ -688,3 +699,16 @@ def _utc_now() -> datetime:
     """Return the explicit UTC clock used by recording maintenance factories."""
 
     return datetime.now(UTC)
+
+
+def _create_recording_key_store(
+    *, platform_name: str | None = None
+) -> RecordingKeyStore:
+    """Select the strict macOS adapter or a lazy unavailable host adapter."""
+
+    resolved_platform = (
+        platform_name if platform_name is not None else platform.system()
+    )
+    if resolved_platform == "Darwin":
+        return MacOSKeychainRecordingKeyStore(platform_name=resolved_platform)
+    return UnavailableRecordingKeyStore()

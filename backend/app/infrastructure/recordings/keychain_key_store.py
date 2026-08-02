@@ -89,11 +89,19 @@ class MacOSKeychainRecordingKeyStore:
 
     SERVICE = "com.ai-meeting-copilot.recording-key"
 
-    def __init__(self, native: _SecurityFramework | None = None) -> None:
+    def __init__(
+        self,
+        native: _SecurityFramework | None = None,
+        *,
+        platform_name: str | None = None,
+    ) -> None:
         self._native: _SecurityFramework = (
             native if native is not None else _create_native_security_framework()
         )
-        if _current_platform() != "Darwin":
+        resolved_platform = (
+            platform_name if platform_name is not None else _current_platform()
+        )
+        if resolved_platform != "Darwin":
             raise RecordingKeyUnavailableError("Recording key storage is unsupported.")
 
     async def create_key(self, recording_id: UUID) -> RecordingKeyReference:

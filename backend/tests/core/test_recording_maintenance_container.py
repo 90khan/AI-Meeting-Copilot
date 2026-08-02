@@ -9,15 +9,21 @@ import pytest
 from app.application.dto.recordings import (
     RecordingCleanupResult,
     RecordingDeletionStatus,
+    RecordingKeyReference,
     RecordingMetadata,
     RecordingMetadataRecord,
     RecordingRetentionPolicy,
     RecordingState,
 )
+from app.application.exceptions import RecordingKeyUnavailableError
 from app.core.config import Settings
-from app.core.container import Container
+from app.core.container import Container, _create_recording_key_store
 from app.domain.value_objects import MeetingId
-from app.infrastructure.recordings import RecordingStorageMetadataResolver
+from app.infrastructure.recordings import (
+    MacOSKeychainRecordingKeyStore,
+    RecordingStorageMetadataResolver,
+    UnavailableRecordingKeyStore,
+)
 from pydantic import ValidationError
 
 
@@ -60,6 +66,62 @@ def test_container_owns_lightweight_adapters_and_fresh_factories(
     asyncio.run(exercise())
     with pytest.raises(RuntimeError):
         container.get_recording_key_store()
+
+
+def test_platform_key_store_selection_is_lazy_and_testable(
+    tmp_path: Path,
+) -> None:
+    unavailable = _create_recording_key_store(platform_name="Linux")
+    assert isinstance(unavailable, UnavailableRecordingKeyStore)
+
+    with pytest.raises(RecordingKeyUnavailableError):
+        asyncio.run(
+            unavailable.exists(
+                RecordingKeyReference(value="a" * 24),
+            )
+        )
+
+    assert isinstance(
+        _create_recording_key_store(platform_name="Darwin"),
+        MacOSKeychainRecordingKeyStore,
+    )
+
+    linux_container = Container(
+        Settings(
+            recordings_root_directory=tmp_path / "linux-recordings",
+        ),
+        recording_key_store_factory=lambda: _create_recording_key_store(
+            platform_name="Linux",
+        ),
+    )
+
+    darwin_container = Container(
+        Settings(
+            recordings_root_directory=tmp_path / "darwin-recordings",
+        ),
+        recording_key_store_factory=lambda: _create_recording_key_store(
+            platform_name="Darwin",
+        ),
+    )
+
+    async def exercise() -> None:
+        await linux_container.start()
+        assert isinstance(
+            linux_container.get_recording_key_store(),
+            UnavailableRecordingKeyStore,
+        )
+        await linux_container.stop()
+        await linux_container.stop()
+
+        await darwin_container.start()
+        assert isinstance(
+            darwin_container.get_recording_key_store(),
+            MacOSKeychainRecordingKeyStore,
+        )
+        await darwin_container.stop()
+        await darwin_container.stop()
+
+    asyncio.run(exercise())
 
 
 def test_one_shot_methods_delegate_once(
