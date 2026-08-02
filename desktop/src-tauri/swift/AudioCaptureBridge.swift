@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 /// Main-queue-owned placeholder for a future ScreenCaptureKit audio bridge.
@@ -77,4 +78,79 @@ public func amcpAudioCaptureBridgeStatusPlaceholder(_ handle: UnsafeMutableRawPo
     return onMainQueue {
         Unmanaged<AudioCaptureBridge>.fromOpaque(handle).takeUnretainedValue().statusPlaceholder
     }
+}
+
+private func copyJSONBuffer(_ payload: String?) -> UnsafeMutablePointer<CChar>? {
+    guard let payload else {
+        return nil
+    }
+    return strdup(payload)
+}
+
+@_cdecl("amcp_audio_capture_bridge_free_json_buffer")
+public func amcpAudioCaptureBridgeFreeJSONBuffer(_ buffer: UnsafeMutablePointer<CChar>?) {
+    guard let buffer else {
+        return
+    }
+    free(buffer)
+}
+
+@_cdecl("amcp_audio_capture_bridge_screen_authorization_state")
+public func amcpAudioCaptureBridgeScreenAuthorizationState(
+    _ handle: UnsafeMutableRawPointer?
+) -> UnsafeMutablePointer<CChar>? {
+    guard handle != nil else {
+        return nil
+    }
+    return copyJSONBuffer(screenAuthorizationPayload())
+}
+
+@_cdecl("amcp_audio_capture_bridge_request_screen_authorization")
+public func amcpAudioCaptureBridgeRequestScreenAuthorization(
+    _ handle: UnsafeMutableRawPointer?
+) -> UnsafeMutablePointer<CChar>? {
+    guard handle != nil else {
+        return nil
+    }
+    return copyJSONBuffer(requestScreenAuthorizationPayload())
+}
+
+@_cdecl("amcp_audio_capture_bridge_microphone_authorization_state")
+public func amcpAudioCaptureBridgeMicrophoneAuthorizationState(
+    _ handle: UnsafeMutableRawPointer?
+) -> UnsafeMutablePointer<CChar>? {
+    guard handle != nil else {
+        return nil
+    }
+    return copyJSONBuffer(microphoneAuthorizationPayload())
+}
+
+@_cdecl("amcp_audio_capture_bridge_request_microphone_authorization")
+public func amcpAudioCaptureBridgeRequestMicrophoneAuthorization(
+    _ handle: UnsafeMutableRawPointer?
+) -> UnsafeMutablePointer<CChar>? {
+    guard handle != nil else {
+        return nil
+    }
+    return copyJSONBuffer(requestMicrophoneAuthorizationPayload())
+}
+
+@_cdecl("amcp_audio_capture_bridge_list_displays")
+public func amcpAudioCaptureBridgeListDisplays(
+    _ handle: UnsafeMutableRawPointer?
+) -> UnsafeMutablePointer<CChar>? {
+    guard handle != nil else {
+        return nil
+    }
+    return copyJSONBuffer(displaySourcesPayload())
+}
+
+@_cdecl("amcp_audio_capture_bridge_list_microphones")
+public func amcpAudioCaptureBridgeListMicrophones(
+    _ handle: UnsafeMutableRawPointer?
+) -> UnsafeMutablePointer<CChar>? {
+    guard handle != nil else {
+        return nil
+    }
+    return copyJSONBuffer(microphoneSourcesPayload())
 }

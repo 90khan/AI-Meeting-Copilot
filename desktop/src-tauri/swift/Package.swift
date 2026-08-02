@@ -13,9 +13,24 @@ let package = Package(
     ],
     targets: [
         .target(
+            name: "CaptureSourcesObjC",
+            path: "Sources/CaptureSourcesObjC",
+            publicHeadersPath: "include",
+            linkerSettings: [
+                .linkedFramework("AVFoundation"),
+                .linkedFramework("ScreenCaptureKit")
+            ]
+        ),
+        .target(
             name: "AudioCaptureBridge",
+            dependencies: ["CaptureSourcesObjC"],
             path: ".",
-            sources: ["AudioCaptureBridge.swift"]
+            exclude: ["Sources"],
+            sources: [
+                "AudioAuthorization.swift",
+                "AudioCaptureBridge.swift",
+                "CaptureSources.swift"
+            ]
         )
     ]
 )
