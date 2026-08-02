@@ -545,3 +545,11 @@ The testing strategy emphasizes
 Testing is considered a first-class engineering activity and should evolve together with the architecture.
 
 ---
+
+# macOS Native Audio Capture Smoke Validation
+
+Run this manually on macOS 15 or later with a development build. Grant or deny Screen Recording and Microphone permission deliberately, then verify that capture starts only when the required permissions are authorized. Repeat with a selected display, the default microphone, and an explicitly selected microphone. Confirm that start and stop complete cleanly and that no raw audio, device name, or sample content is printed or persisted.
+
+This is intentionally a local manual check; automated tests use fake native callbacks and never start a real ScreenCaptureKit stream.
+
+---

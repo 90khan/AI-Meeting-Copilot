@@ -8,6 +8,10 @@
 use std::{
     ffi::{c_char, c_void, CStr},
     ptr::NonNull,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
 };
 
 use thiserror::Error;
@@ -17,9 +21,13 @@ use super::{
         parse_microphone_authorization, parse_screen_authorization, MicrophoneAuthorizationState,
         ScreenCaptureAuthorizationState,
     },
+    bridge::{NativeAudioCaptureBridge, NativeAudioCaptureBridgeError, NativeAudioFrameSender},
     sources::{parse_displays, parse_microphones, CaptureDisplaySource, CaptureMicrophoneSource},
     status::{AudioCaptureState, AudioCaptureStatus},
-    types::AudioCaptureConfiguration,
+    types::{
+        AudioCaptureConfiguration, NativeAudioFormat, NativeAudioFrame, NativeAudioSamples,
+        NativeAudioSource, NativeSampleFormat,
+    },
 };
 
 const NATIVE_SUCCESS: i32 = 0;
@@ -40,6 +48,23 @@ trait SwiftAudioCaptureFunctions {
     fn list_displays(&self, handle: *mut c_void) -> *mut c_char;
     fn list_microphones(&self, handle: *mut c_void) -> *mut c_char;
     fn free_json_buffer(&self, buffer: *mut c_char);
+    fn start_capture(
+        &self,
+        handle: *mut c_void,
+        configuration: &AudioCaptureConfiguration,
+        callback: NativeFrameCallback,
+        context: *mut c_void,
+    ) -> i32;
+    fn stop_capture(&self, handle: *mut c_void) -> i32;
+    fn capture_status(&self, handle: *mut c_void) -> i32;
+}
+
+type NativeFrameCallback =
+    extern "C" fn(*mut c_void, u8, u32, u16, u8, bool, f64, *const c_void, usize);
+
+struct CallbackState {
+    accepting: AtomicBool,
+    sender: Mutex<Option<NativeAudioFrameSender>>,
 }
 
 struct SystemSwiftAudioCaptureFunctions;
@@ -98,6 +123,38 @@ impl SwiftAudioCaptureFunctions for SystemSwiftAudioCaptureFunctions {
     fn free_json_buffer(&self, buffer: *mut c_char) {
         unsafe { amcp_audio_capture_bridge_free_json_buffer(buffer) }
     }
+
+    fn start_capture(
+        &self,
+        handle: *mut c_void,
+        configuration: &AudioCaptureConfiguration,
+        callback: NativeFrameCallback,
+        context: *mut c_void,
+    ) -> i32 {
+        let microphone_id = configuration
+            .microphone_device_id()
+            .map(|id| std::ffi::CString::new(id).expect("validated device ID"));
+        unsafe {
+            amcp_audio_capture_bridge_start_capture(
+                handle,
+                configuration.display_id(),
+                microphone_id
+                    .as_ref()
+                    .map_or(std::ptr::null(), |value| value.as_ptr()),
+                configuration.include_system_audio(),
+                configuration.include_microphone(),
+                configuration.exclude_current_process_audio(),
+                callback,
+                context,
+            )
+        }
+    }
+    fn stop_capture(&self, handle: *mut c_void) -> i32 {
+        unsafe { amcp_audio_capture_bridge_stop_capture(handle) }
+    }
+    fn capture_status(&self, handle: *mut c_void) -> i32 {
+        unsafe { amcp_audio_capture_bridge_capture_status(handle) }
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -117,6 +174,18 @@ unsafe extern "C" {
     ) -> *mut c_char;
     fn amcp_audio_capture_bridge_list_displays(handle: *mut c_void) -> *mut c_char;
     fn amcp_audio_capture_bridge_list_microphones(handle: *mut c_void) -> *mut c_char;
+    fn amcp_audio_capture_bridge_start_capture(
+        handle: *mut c_void,
+        display_id: u32,
+        microphone_id: *const c_char,
+        include_system_audio: bool,
+        include_microphone: bool,
+        exclude_current_process_audio: bool,
+        callback: NativeFrameCallback,
+        context: *mut c_void,
+    ) -> i32;
+    fn amcp_audio_capture_bridge_stop_capture(handle: *mut c_void) -> i32;
+    fn amcp_audio_capture_bridge_capture_status(handle: *mut c_void) -> i32;
 }
 
 /// Safe, privacy-preserving errors from the native bridge boundary.
@@ -140,6 +209,8 @@ pub(crate) enum SwiftAudioCaptureBridgeError {
 struct SwiftAudioCaptureBridge<F: SwiftAudioCaptureFunctions = SystemSwiftAudioCaptureFunctions> {
     functions: F,
     handle: Option<NonNull<c_void>>,
+    callback_state: Option<Arc<CallbackState>>,
+    callback_context: Option<*const CallbackState>,
 }
 
 impl SwiftAudioCaptureBridge<SystemSwiftAudioCaptureFunctions> {
@@ -163,6 +234,8 @@ impl<F: SwiftAudioCaptureFunctions> SwiftAudioCaptureBridge<F> {
         Ok(Self {
             functions,
             handle: Some(handle),
+            callback_state: None,
+            callback_context: None,
         })
     }
 
@@ -262,11 +335,144 @@ impl<F: SwiftAudioCaptureFunctions> SwiftAudioCaptureBridge<F> {
     }
 }
 
+extern "C" fn receive_native_frame(
+    context: *mut c_void,
+    source: u8,
+    sample_rate_hz: u32,
+    channels: u16,
+    sample_format: u8,
+    interleaved: bool,
+    timestamp: f64,
+    samples: *const c_void,
+    sample_count: usize,
+) {
+    if context.is_null() || samples.is_null() {
+        return;
+    }
+    let state = unsafe { &*(context as *const CallbackState) };
+    if !state.accepting.load(Ordering::Acquire) {
+        return;
+    }
+    let (source, format, samples) = match (source, sample_format) {
+        (1, 1) => (
+            NativeAudioSource::SystemAudio,
+            NativeSampleFormat::Float32,
+            NativeAudioSamples::Float32(
+                unsafe { std::slice::from_raw_parts(samples.cast::<f32>(), sample_count) }.to_vec(),
+            ),
+        ),
+        (1, 2) => (
+            NativeAudioSource::SystemAudio,
+            NativeSampleFormat::SignedInt16,
+            NativeAudioSamples::SignedInt16(
+                unsafe { std::slice::from_raw_parts(samples.cast::<i16>(), sample_count) }.to_vec(),
+            ),
+        ),
+        (2, 1) => (
+            NativeAudioSource::Microphone,
+            NativeSampleFormat::Float32,
+            NativeAudioSamples::Float32(
+                unsafe { std::slice::from_raw_parts(samples.cast::<f32>(), sample_count) }.to_vec(),
+            ),
+        ),
+        (2, 2) => (
+            NativeAudioSource::Microphone,
+            NativeSampleFormat::SignedInt16,
+            NativeAudioSamples::SignedInt16(
+                unsafe { std::slice::from_raw_parts(samples.cast::<i16>(), sample_count) }.to_vec(),
+            ),
+        ),
+        _ => return,
+    };
+    let Ok(format) = NativeAudioFormat::new(sample_rate_hz, channels, format, interleaved) else {
+        return;
+    };
+    let Ok(frame) = NativeAudioFrame::new(source, format, timestamp, samples) else {
+        return;
+    };
+    if let Some(sender) = state.sender.lock().ok().and_then(|guard| guard.clone()) {
+        let _ = sender.try_send(frame);
+    }
+}
+
+impl<F: SwiftAudioCaptureFunctions> NativeAudioCaptureBridge for SwiftAudioCaptureBridge<F> {
+    fn start(
+        &mut self,
+        configuration: &AudioCaptureConfiguration,
+        frame_sender: NativeAudioFrameSender,
+    ) -> Result<(), NativeAudioCaptureBridgeError> {
+        if self.callback_state.is_some() {
+            return Err(NativeAudioCaptureBridgeError::StartFailed);
+        }
+        let state = Arc::new(CallbackState {
+            accepting: AtomicBool::new(true),
+            sender: Mutex::new(Some(frame_sender)),
+        });
+        let callback_context = Arc::into_raw(state.clone());
+        let context = callback_context.cast_mut().cast::<c_void>();
+        if self.functions.start_capture(
+            self.handle()
+                .map_err(|_| NativeAudioCaptureBridgeError::StartFailed)?
+                .as_ptr(),
+            configuration,
+            receive_native_frame,
+            context,
+        ) != NATIVE_SUCCESS
+        {
+            unsafe {
+                drop(Arc::from_raw(callback_context));
+            }
+            return Err(NativeAudioCaptureBridgeError::StartFailed);
+        }
+        self.callback_state = Some(state);
+        self.callback_context = Some(callback_context);
+        Ok(())
+    }
+    fn stop(&mut self) -> Result<(), NativeAudioCaptureBridgeError> {
+        if self.callback_state.is_none() {
+            return Ok(());
+        }
+        if self.functions.stop_capture(
+            self.handle()
+                .map_err(|_| NativeAudioCaptureBridgeError::StopFailed)?
+                .as_ptr(),
+        ) != NATIVE_SUCCESS
+        {
+            return Err(NativeAudioCaptureBridgeError::StopFailed);
+        }
+        if let Some(state) = self.callback_state.take() {
+            state.accepting.store(false, Ordering::Release);
+            *state
+                .sender
+                .lock()
+                .map_err(|_| NativeAudioCaptureBridgeError::StopFailed)? = None;
+        }
+        if let Some(context) = self.callback_context.take() {
+            unsafe {
+                drop(Arc::from_raw(context));
+            }
+        }
+        Ok(())
+    }
+    fn status(&self) -> AudioCaptureStatus {
+        let state = match self
+            .handle()
+            .map(|handle| self.functions.capture_status(handle.as_ptr()))
+        {
+            Ok(1) => AudioCaptureState::Capturing,
+            Ok(2) => AudioCaptureState::Failed,
+            _ => AudioCaptureState::Stopped,
+        };
+        AudioCaptureStatus::new(state, None).expect("static status is valid")
+    }
+}
+
 impl<F> Drop for SwiftAudioCaptureBridge<F>
 where
     F: SwiftAudioCaptureFunctions,
 {
     fn drop(&mut self) {
+        let _ = self.stop();
         if let Some(handle) = self.handle.take() {
             self.functions.destroy(handle.as_ptr());
         }
@@ -287,11 +493,16 @@ mod tests {
     use std::{
         ffi::{c_char, c_void, CString},
         ptr::NonNull,
-        sync::{Arc, Mutex},
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc, Mutex,
+        },
     };
+    use tokio::sync::mpsc;
 
     use super::{
-        AudioCaptureConfiguration, AudioCaptureState, SwiftAudioCaptureBridge,
+        receive_native_frame, AudioCaptureConfiguration, AudioCaptureState, CallbackState,
+        NativeAudioFrameSender, NativeFrameCallback, SwiftAudioCaptureBridge,
         SwiftAudioCaptureBridgeError, SwiftAudioCaptureFunctions,
     };
 
@@ -401,6 +612,26 @@ mod tests {
                 .freed_json_buffers += 1;
             // The fake allocates each return value through `CString::into_raw`.
             unsafe { drop(CString::from_raw(buffer)) };
+        }
+
+        fn start_capture(
+            &self,
+            _handle: *mut c_void,
+            _configuration: &AudioCaptureConfiguration,
+            _callback: NativeFrameCallback,
+            _context: *mut c_void,
+        ) -> i32 {
+            self.state.lock().expect("state is available").status = 1;
+            0
+        }
+
+        fn stop_capture(&self, _handle: *mut c_void) -> i32 {
+            self.state.lock().expect("state is available").status = 0;
+            0
+        }
+
+        fn capture_status(&self, _handle: *mut c_void) -> i32 {
+            self.state.lock().expect("state is available").status
         }
     }
 
@@ -529,5 +760,53 @@ mod tests {
             state.lock().expect("state is available").freed_json_buffers,
             1
         );
+    }
+
+    #[test]
+    fn callback_copies_float_and_int16_frames_without_blocking() {
+        let (sender, mut receiver) = mpsc::channel(1);
+        let state = Arc::new(CallbackState {
+            accepting: AtomicBool::new(true),
+            sender: Mutex::new(Some(NativeAudioFrameSender::new(sender))),
+        });
+        let context = Arc::into_raw(state.clone()).cast_mut().cast::<c_void>();
+        let float_samples = [0.25_f32, -0.25_f32];
+        receive_native_frame(
+            context,
+            1,
+            48_000,
+            2,
+            1,
+            true,
+            1.0,
+            float_samples.as_ptr().cast(),
+            float_samples.len(),
+        );
+        let frame = receiver.try_recv().expect("frame is copied");
+        assert_eq!(
+            frame.source(),
+            crate::audio_capture::types::NativeAudioSource::SystemAudio
+        );
+        assert_eq!(frame.format().channels(), 2);
+        assert!(
+            matches!(frame.samples(), crate::audio_capture::types::NativeAudioSamples::Float32(values) if values == &float_samples)
+        );
+        state.accepting.store(false, Ordering::Release);
+        let int_samples = [1_i16];
+        receive_native_frame(
+            context,
+            2,
+            48_000,
+            1,
+            2,
+            true,
+            2.0,
+            int_samples.as_ptr().cast(),
+            1,
+        );
+        assert!(receiver.try_recv().is_err());
+        unsafe {
+            drop(Arc::from_raw(context.cast::<CallbackState>()));
+        }
     }
 }

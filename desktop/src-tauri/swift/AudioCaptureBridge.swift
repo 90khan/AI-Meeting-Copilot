@@ -4,6 +4,7 @@ import Foundation
 /// Main-queue-owned placeholder for a future ScreenCaptureKit audio bridge.
 private final class AudioCaptureBridge {
     private var isStarted = false
+    private let captureEngine = ScreenCaptureEngine()
 
     func startPlaceholder() -> Int32 {
         isStarted = true
@@ -18,6 +19,30 @@ private final class AudioCaptureBridge {
     var statusPlaceholder: Int32 {
         isStarted ? 1 : 0
     }
+
+    func startCapture(
+        displayID: UInt32,
+        microphoneDeviceID: UnsafePointer<CChar>?,
+        includeSystemAudio: Bool,
+        includeMicrophone: Bool,
+        excludeCurrentProcessAudio: Bool,
+        callback: AMCPAudioFrameCallback?,
+        context: UnsafeMutableRawPointer?
+    ) -> Int32 {
+        guard let captureEngine else { return 1 }
+        let result = captureEngine.start(displayID: displayID, microphoneDeviceID: microphoneDeviceID, includeSystemAudio: includeSystemAudio, includeMicrophone: includeMicrophone, excludeCurrentProcessAudio: excludeCurrentProcessAudio, callback: callback, context: context)
+        isStarted = result == 0
+        return result
+    }
+
+    func stopCapture() -> Int32 {
+        guard let captureEngine else { return 1 }
+        let result = captureEngine.stop()
+        isStarted = false
+        return result
+    }
+
+    var captureStatus: Int32 { captureEngine?.status ?? 2 }
 }
 
 /// Executes all Swift bridge lifecycle work on the main queue.
@@ -153,4 +178,22 @@ public func amcpAudioCaptureBridgeListMicrophones(
         return nil
     }
     return copyJSONBuffer(microphoneSourcesPayload())
+}
+
+@_cdecl("amcp_audio_capture_bridge_start_capture")
+public func amcpAudioCaptureBridgeStartCapture(_ handle: UnsafeMutableRawPointer?, _ displayID: UInt32, _ microphoneDeviceID: UnsafePointer<CChar>?, _ includeSystemAudio: Bool, _ includeMicrophone: Bool, _ excludeCurrentProcessAudio: Bool, _ callback: AMCPAudioFrameCallback?, _ context: UnsafeMutableRawPointer?) -> Int32 {
+    guard let handle else { return 1 }
+    return onMainQueue { Unmanaged<AudioCaptureBridge>.fromOpaque(handle).takeUnretainedValue().startCapture(displayID: displayID, microphoneDeviceID: microphoneDeviceID, includeSystemAudio: includeSystemAudio, includeMicrophone: includeMicrophone, excludeCurrentProcessAudio: excludeCurrentProcessAudio, callback: callback, context: context) }
+}
+
+@_cdecl("amcp_audio_capture_bridge_stop_capture")
+public func amcpAudioCaptureBridgeStopCapture(_ handle: UnsafeMutableRawPointer?) -> Int32 {
+    guard let handle else { return 1 }
+    return onMainQueue { Unmanaged<AudioCaptureBridge>.fromOpaque(handle).takeUnretainedValue().stopCapture() }
+}
+
+@_cdecl("amcp_audio_capture_bridge_capture_status")
+public func amcpAudioCaptureBridgeCaptureStatus(_ handle: UnsafeMutableRawPointer?) -> Int32 {
+    guard let handle else { return 2 }
+    return onMainQueue { Unmanaged<AudioCaptureBridge>.fromOpaque(handle).takeUnretainedValue().captureStatus }
 }

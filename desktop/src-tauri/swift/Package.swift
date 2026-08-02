@@ -29,7 +29,8 @@ let package = Package(
             sources: [
                 "AudioAuthorization.swift",
                 "AudioCaptureBridge.swift",
-                "CaptureSources.swift"
+                "CaptureSources.swift",
+                "ScreenCaptureEngine.swift"
             ]
         )
     ]
