@@ -1,5 +1,6 @@
 """FastAPI application bootstrap."""
 
+from asyncio import Event
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -13,7 +14,11 @@ from app.core.container import Container
 APP_VERSION = "0.1.0"
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    *,
+    readiness_event: Event | None = None,
+) -> FastAPI:
     """Create a FastAPI application with an isolated composition container."""
 
     if settings is None:
@@ -24,6 +29,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         await container.start()
+        if readiness_event is not None:
+            readiness_event.set()
         try:
             yield
         finally:

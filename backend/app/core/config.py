@@ -58,6 +58,9 @@ class Settings(BaseSettings):
     ollama_context_length: int = 8192
     ollama_keep_alive: str = "5m"
     sidecar_auth_token: str | None = Field(default=None, repr=False)
+    sidecar_host: str = "127.0.0.1"
+    sidecar_port: int = 0
+    sidecar_startup_timeout_seconds: float = 15.0
 
     @field_validator(
         "speech_to_text_provider",
@@ -212,6 +215,38 @@ class Settings(BaseSettings):
         if not normalized_value:
             raise ValueError("Sidecar authentication token must not be blank.")
         return normalized_value
+
+    @field_validator("sidecar_host", mode="before")
+    @classmethod
+    def normalize_sidecar_host(cls, value: str) -> str:
+        """Allow only explicitly configured loopback host names or addresses."""
+
+        if not isinstance(value, str):
+            raise ValueError("Sidecar host must be a string.")
+        normalized_value = value.strip().lower()
+        if normalized_value not in {"127.0.0.1", "localhost", "::1"}:
+            raise ValueError("Sidecar host must be a loopback address.")
+        return normalized_value
+
+    @field_validator("sidecar_port")
+    @classmethod
+    def validate_sidecar_port(cls, value: int) -> int:
+        """Validate the sidecar port, including the ephemeral-port sentinel."""
+
+        if not 0 <= value <= 65_535:
+            raise ValueError("Sidecar port must be between 0 and 65535.")
+        return value
+
+    @field_validator("sidecar_startup_timeout_seconds")
+    @classmethod
+    def validate_sidecar_startup_timeout_seconds(cls, value: float) -> float:
+        """Validate the finite positive sidecar startup deadline."""
+
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(
+                "Sidecar startup timeout must be finite and greater than zero."
+            )
+        return value
 
 
 @lru_cache(maxsize=1)

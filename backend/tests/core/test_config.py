@@ -201,6 +201,50 @@ def test_sidecar_auth_token_rejects_blank_configuration(token: str) -> None:
         Settings(sidecar_auth_token=token)
 
 
+def test_sidecar_listener_settings_use_safe_loopback_defaults() -> None:
+    """The sidecar defaults to an ephemeral loopback listener."""
+
+    settings = Settings()
+
+    assert settings.sidecar_host == "127.0.0.1"
+    assert settings.sidecar_port == 0
+    assert settings.sidecar_startup_timeout_seconds == 15.0
+
+
+def test_sidecar_host_reads_and_normalizes_prefixed_environment_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The listener host remains a normalized loopback value from the environment."""
+
+    monkeypatch.setenv("AI_MEETING_COPILOT_SIDECAR_HOST", " LOCALHOST ")
+
+    assert Settings().sidecar_host == "localhost"
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "192.168.1.20", "example.com", " "])
+def test_sidecar_settings_reject_non_loopback_hosts(host: str) -> None:
+    """The backend cannot be configured for LAN or public binding."""
+
+    with pytest.raises(ValidationError, match="loopback"):
+        Settings(sidecar_host=host)
+
+
+@pytest.mark.parametrize("port", [-1, 65_536])
+def test_sidecar_settings_reject_invalid_ports(port: int) -> None:
+    """Listener ports remain within the valid socket range."""
+
+    with pytest.raises(ValidationError, match="between 0 and 65535"):
+        Settings(sidecar_port=port)
+
+
+@pytest.mark.parametrize("timeout", [0.0, -1.0, float("inf"), float("nan")])
+def test_sidecar_settings_reject_invalid_startup_timeout(timeout: float) -> None:
+    """The startup deadline must be finite and positive."""
+
+    with pytest.raises(ValidationError, match="startup timeout"):
+        Settings(sidecar_startup_timeout_seconds=timeout)
+
+
 def test_ollama_settings_read_prefixed_environment_overrides(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

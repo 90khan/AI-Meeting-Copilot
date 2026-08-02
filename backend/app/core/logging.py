@@ -12,7 +12,7 @@ _FORMATTER = logging.Formatter(
 )
 
 
-def setup_logging(settings: Settings) -> None:
+def setup_logging(settings: Settings, *, stream: TextIO | None = None) -> None:
     """Configure idempotent console logging from application settings."""
 
     level = _resolve_log_level(settings.log_level)
@@ -20,6 +20,8 @@ def setup_logging(settings: Settings) -> None:
     root_logger.setLevel(level)
 
     handler = _get_console_handler(root_logger)
+    if stream is not None:
+        handler.setStream(stream)
     handler.setLevel(level)
     handler.setFormatter(_FORMATTER)
 
