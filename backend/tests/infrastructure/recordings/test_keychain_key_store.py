@@ -30,8 +30,8 @@ class FakeNative:
             raise KeyError(account)
         return self.items[account]
 
-    def delete(self, *, service: str, account: str) -> bool:
-        return self.items.pop(account, None) is not None
+    def delete(self, *, service: str, account: str) -> None:
+        self.items.pop(account, None)
 
     def exists(self, *, service: str, account: str) -> bool:
         return account in self.items

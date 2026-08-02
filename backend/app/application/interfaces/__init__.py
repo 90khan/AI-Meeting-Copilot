@@ -15,6 +15,10 @@ from app.application.interfaces.ai import (
 from app.application.interfaces.live_transcription import LiveTranscriptionSession
 from app.application.interfaces.recording_key_store import RecordingKeyStore
 from app.application.interfaces.recording_repository import RecordingRepository
+from app.application.interfaces.recording_storage import (
+    RecordingSegmentWriter,
+    RecordingStorage,
+)
 from app.application.interfaces.unit_of_work import UnitOfWork
 from app.application.interfaces.unit_of_work_factory import UnitOfWorkFactory
 
@@ -26,6 +30,8 @@ __all__ = [
     "MeetingSummarizationProviderFactory",
     "RecordingKeyStore",
     "RecordingRepository",
+    "RecordingSegmentWriter",
+    "RecordingStorage",
     "ReplyCoachingProvider",
     "ReplyCoachingProviderFactory",
     "SpeechToTextProvider",

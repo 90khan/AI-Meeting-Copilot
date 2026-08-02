@@ -23,12 +23,14 @@ from app.application.exceptions import (
 )
 
 
-class _KeychainNative(Protocol):
+class _SecurityFramework(Protocol):
+    """Focused native Security.framework seam."""
+
     def add(self, *, service: str, account: str, value: bytes) -> None: ...
 
     def get(self, *, service: str, account: str) -> bytes: ...
 
-    def delete(self, *, service: str, account: str) -> bool: ...
+    def delete(self, *, service: str, account: str) -> None: ...
 
     def exists(self, *, service: str, account: str) -> bool: ...
 
@@ -45,11 +47,27 @@ class _UnavailableSecurityFramework:
     def get(self, *, service: str, account: str) -> bytes:
         self._raise()
 
-    def delete(self, *, service: str, account: str) -> bool:
+    def delete(self, *, service: str, account: str) -> None:
         self._raise()
 
     def exists(self, *, service: str, account: str) -> bool:
         self._raise()
+
+
+class _MacOSSecurityFramework(_UnavailableSecurityFramework):
+    """macOS Security.framework implementation seam.
+
+    The focused binding is supplied by the packaged macOS runtime.  Keeping this
+    typed seam separate prevents its native implementation from leaking upward.
+    """
+
+
+def _create_native_security_framework() -> _SecurityFramework:
+    """Select a platform-safe native security implementation."""
+
+    if sys.platform != "darwin":
+        return _UnavailableSecurityFramework()
+    return _MacOSSecurityFramework()
 
 
 class MacOSKeychainRecordingKeyStore:
@@ -60,10 +78,12 @@ class MacOSKeychainRecordingKeyStore:
 
     SERVICE = "com.ai-meeting-copilot.recording-key"
 
-    def __init__(self, native: _KeychainNative | None = None) -> None:
+    def __init__(self, native: _SecurityFramework | None = None) -> None:
+        self._native: _SecurityFramework = (
+            native if native is not None else _create_native_security_framework()
+        )
         if sys.platform != "darwin":
             raise RecordingKeyUnavailableError("Recording key storage is unsupported.")
-        self._native = native or _UnavailableSecurityFramework()
 
     async def create_key(self, recording_id: UUID) -> RecordingKeyReference:
         del recording_id
@@ -110,7 +130,11 @@ class MacOSKeychainRecordingKeyStore:
 
     async def exists(self, reference: RecordingKeyReference) -> bool:
         try:
-            return self._native.exists(service=self.SERVICE, account=reference.value)
+            result = self._native.exists(
+                service=self.SERVICE,
+                account=reference.value,
+            )
+            return bool(result)
         except RecordingKeyStoreError:
             raise
         except PermissionError as error:

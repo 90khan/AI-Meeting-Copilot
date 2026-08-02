@@ -15,6 +15,15 @@ from app.application.exceptions.recording_key_errors import (
     RecordingKeyStoreError,
     RecordingKeyUnavailableError,
 )
+from app.application.exceptions.recording_storage_errors import (
+    RecordingSegmentAuthenticationError,
+    RecordingSegmentCorruptError,
+    RecordingSegmentLifecycleError,
+    RecordingSegmentNotFoundError,
+    RecordingSegmentTooLargeError,
+    RecordingStorageError,
+    RecordingStorageUnavailableError,
+)
 from app.application.exceptions.validation import ApplicationValidationError
 
 __all__ = [
@@ -30,4 +39,11 @@ __all__ = [
     "RecordingKeyNotFoundError",
     "RecordingKeyStoreError",
     "RecordingKeyUnavailableError",
+    "RecordingSegmentAuthenticationError",
+    "RecordingSegmentCorruptError",
+    "RecordingSegmentLifecycleError",
+    "RecordingSegmentNotFoundError",
+    "RecordingSegmentTooLargeError",
+    "RecordingStorageError",
+    "RecordingStorageUnavailableError",
 ]

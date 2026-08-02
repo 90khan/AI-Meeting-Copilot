@@ -18,6 +18,7 @@ from app.application.dto.recordings.recording_session import (
     PrepareRecordingSessionResult,
 )
 from app.application.dto.recordings.retention import RecordingRetentionPolicy
+from app.application.dto.recordings.storage import RecordingSegmentDescriptor
 
 __all__ = [
     "FinalizeRecordingCommand",
@@ -31,5 +32,6 @@ __all__ = [
     "RecordingMetadata",
     "RecordingMetadataRecord",
     "RecordingRetentionPolicy",
+    "RecordingSegmentDescriptor",
     "RecordingState",
 ]
