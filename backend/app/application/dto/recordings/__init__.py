@@ -1,5 +1,10 @@
 """Recording metadata DTOs."""
 
+from app.application.dto.recordings.cleanup import (
+    RecordingCleanupItemResult,
+    RecordingCleanupOutcome,
+    RecordingCleanupResult,
+)
 from app.application.dto.recordings.encryption import (
     RecordingEncryptionKey,
     RecordingKeyReference,
@@ -26,6 +31,9 @@ __all__ = [
     "MarkRecordingStartedCommand",
     "PrepareRecordingSessionCommand",
     "PrepareRecordingSessionResult",
+    "RecordingCleanupItemResult",
+    "RecordingCleanupOutcome",
+    "RecordingCleanupResult",
     "RecordingDeletionStatus",
     "RecordingEncryptionKey",
     "RecordingKeyReference",
