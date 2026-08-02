@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.api.routes.health import router as health_router
+from app.api.routes.live_transcription import router as live_transcription_router
 from app.core.config import Settings, get_settings
 from app.core.container import Container
 
@@ -31,4 +32,5 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(lifespan=lifespan, version=APP_VERSION)
     app.state.container = container
     app.include_router(health_router)
+    app.include_router(live_transcription_router)
     return app
