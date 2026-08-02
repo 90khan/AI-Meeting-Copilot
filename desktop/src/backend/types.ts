@@ -26,6 +26,21 @@ export interface LiveTranscriptionStatus {
   message: string | null;
 }
 
+export interface AssistModeSessionConfiguration {
+  enabled: boolean;
+  translationEnabled: boolean;
+  simplificationEnabled: boolean;
+  simplificationLevel: "b1" | "b2" | null;
+  replyCoachingEnabled: boolean;
+}
+
+export interface StartLiveTranscriptionSessionInput {
+  meetingId: string;
+  languageHint: string | null;
+  source: "mixed" | "microphone" | "system_audio";
+  assistMode: AssistModeSessionConfiguration;
+}
+
 export type CaptureAuthorizationState =
   | "not_determined"
   | "authorized"

@@ -24,6 +24,7 @@ import type {
   CaptureDisplaySource,
   CaptureMicrophoneSource,
   LiveTranscriptionStatus,
+  AssistModeSessionConfiguration,
 } from "./backend/types";
 
 const GENERIC_STATUS_ERROR = "The backend status is unavailable.";
@@ -63,6 +64,13 @@ export default function App() {
   const [simplificationEnabled, setSimplificationEnabled] = useState(false);
   const [simplificationLevel, setSimplificationLevel] = useState<"b1" | "b2">("b1");
   const [replyCoachingEnabled, setReplyCoachingEnabled] = useState(true);
+  const assistSessionConfiguration: AssistModeSessionConfiguration = {
+    enabled: assistEnabled,
+    translationEnabled,
+    simplificationEnabled,
+    simplificationLevel: simplificationEnabled ? simplificationLevel : null,
+    replyCoachingEnabled,
+  };
 
   useEffect(() => {
     let isMounted = true;
@@ -222,6 +230,7 @@ export default function App() {
   const canStopBackend =
     !isPending && (backendStatus?.status === "ready" || backendStatus?.status === "failed");
   const controlsDisabled = isPending || !backendReady;
+  const assistControlsDisabled = liveSessionActive;
 
   return (
     <main className="app-shell">
@@ -288,16 +297,16 @@ export default function App() {
         </section>
         <section className="assist-controls" aria-labelledby="assist-controls-title">
           <h2 id="assist-controls-title">Assist configuration</h2>
-          <label><input type="checkbox" checked={assistEnabled} onChange={(event) => setAssistEnabled(event.target.checked)} /> Enable Assist Mode</label>
-          <label><input type="checkbox" checked={translationEnabled} disabled={!assistEnabled} onChange={(event) => setTranslationEnabled(event.target.checked)} /> Turkish translation</label>
-          <label><input type="checkbox" checked={simplificationEnabled} disabled={!assistEnabled} onChange={(event) => setSimplificationEnabled(event.target.checked)} /> German simplification</label>
+          <label><input type="checkbox" checked={assistEnabled} disabled={assistControlsDisabled} onChange={(event) => setAssistEnabled(event.target.checked)} /> Enable Assist Mode</label>
+          <label><input type="checkbox" checked={translationEnabled} disabled={!assistEnabled || assistControlsDisabled} onChange={(event) => setTranslationEnabled(event.target.checked)} /> Turkish translation</label>
+          <label><input type="checkbox" checked={simplificationEnabled} disabled={!assistEnabled || assistControlsDisabled} onChange={(event) => setSimplificationEnabled(event.target.checked)} /> German simplification</label>
           <label>
             Simplification level
-            <select value={simplificationLevel} disabled={!assistEnabled || !simplificationEnabled} onChange={(event) => setSimplificationLevel(event.target.value as "b1" | "b2")}>
+            <select value={simplificationLevel} disabled={!assistEnabled || !simplificationEnabled || assistControlsDisabled} onChange={(event) => setSimplificationLevel(event.target.value as "b1" | "b2")}>
               <option value="b1">B1</option><option value="b2">B2</option>
             </select>
           </label>
-          <label><input type="checkbox" checked={replyCoachingEnabled} disabled={!assistEnabled} onChange={(event) => setReplyCoachingEnabled(event.target.checked)} /> Reply coaching</label>
+          <label><input type="checkbox" checked={replyCoachingEnabled} disabled={!assistEnabled || assistControlsDisabled} onChange={(event) => setReplyCoachingEnabled(event.target.checked)} /> Reply coaching</label>
         </section>
         {assistEnabled && <AssistModePanel state={assistState} />}
         {(errorMessage || backendStatus?.status === "failed" || captureStatus?.state === "failed") && (

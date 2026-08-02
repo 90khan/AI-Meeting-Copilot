@@ -10,7 +10,7 @@ use audio_capture::commands::{
 };
 use live_transcription::client::{
     connect_live_transcription, disconnect_live_transcription, get_live_transcription_status,
-    LiveTranscriptionClient,
+    start_live_transcription_session, LiveTranscriptionClient,
 };
 use sidecar::manager::{get_backend_status, start_backend, stop_backend, SidecarManager};
 use tauri::Manager;
@@ -32,6 +32,7 @@ pub fn run() {
             connect_live_transcription,
             disconnect_live_transcription,
             get_live_transcription_status,
+            start_live_transcription_session,
             get_audio_capture_status,
             get_capture_authorization,
             request_capture_authorization,

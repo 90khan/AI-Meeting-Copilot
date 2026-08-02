@@ -7,6 +7,7 @@ import type {
   CaptureDisplaySource,
   CaptureMicrophoneSource,
   LiveTranscriptionStatus,
+  StartLiveTranscriptionSessionInput,
   StartAudioCaptureInput,
 } from "./types";
 
@@ -24,6 +25,19 @@ export function getBackendStatus(): Promise<BackendStatus> {
 
 export function getLiveTranscriptionStatus(): Promise<LiveTranscriptionStatus> {
   return invoke<LiveTranscriptionStatus>("get_live_transcription_status");
+}
+
+export function startLiveTranscriptionSession(
+  input: StartLiveTranscriptionSessionInput,
+): Promise<LiveTranscriptionStatus> {
+  if (
+    input.assistMode.enabled &&
+    input.assistMode.simplificationEnabled &&
+    input.assistMode.simplificationLevel === null
+  ) {
+    return Promise.reject(new Error("Invalid Assist Mode configuration."));
+  }
+  return invoke<LiveTranscriptionStatus>("start_live_transcription_session", { input });
 }
 
 export function getAudioCaptureStatus(): Promise<AudioCaptureStatus> {

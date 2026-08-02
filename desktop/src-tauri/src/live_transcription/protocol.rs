@@ -2,7 +2,7 @@
 
 #![allow(dead_code)] // Session/audio operations are intentionally not frontend commands yet.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 use uuid::Uuid;
@@ -17,12 +17,41 @@ pub const AUDIO_FRAME_MAGIC: &[u8; 4] = b"AMCP";
 pub const AUDIO_MESSAGE_KIND: u8 = 1;
 pub const DEFAULT_MAX_IN_FLIGHT_CHUNKS: u8 = 1;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum AudioSource {
     Mixed,
     Microphone,
     SystemAudio,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SimplificationLevel {
+    B1,
+    B2,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) struct AssistModeConfiguration {
+    pub(crate) enabled: bool,
+    pub(crate) translation_enabled: bool,
+    pub(crate) simplification_enabled: bool,
+    pub(crate) simplification_level: Option<SimplificationLevel>,
+    pub(crate) reply_coaching_enabled: bool,
+}
+
+impl AssistModeConfiguration {
+    pub(crate) fn validate(&self) -> Result<(), ProtocolError> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if self.simplification_enabled != self.simplification_level.is_some() {
+            return Err(ProtocolError::InvalidMessage);
+        }
+        Ok(())
+    }
 }
 
 impl AudioSource {
@@ -63,6 +92,7 @@ struct StartSessionMessage<'a> {
     meeting_id: Uuid,
     language_hint: Option<&'a str>,
     source: AudioSource,
+    assist_mode: &'a AssistModeConfiguration,
 }
 
 #[derive(Serialize)]
@@ -94,8 +124,10 @@ pub(crate) fn serialize_start_session(
     meeting_id: Uuid,
     language_hint: Option<&str>,
     source: AudioSource,
+    assist_mode: &AssistModeConfiguration,
 ) -> Result<String, ProtocolError> {
-    if language_hint.is_some_and(|value| value.trim().is_empty()) {
+    if language_hint.is_some_and(|value| value.trim().is_empty()) || assist_mode.validate().is_err()
+    {
         return Err(ProtocolError::InvalidMessage);
     }
     serde_json::to_string(&StartSessionMessage {
@@ -105,6 +137,7 @@ pub(crate) fn serialize_start_session(
         meeting_id,
         language_hint,
         source,
+        assist_mode,
     })
     .map_err(|_| ProtocolError::InvalidMessage)
 }
@@ -595,7 +628,10 @@ fn optional_uuid(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_server_message, serialize_hello, AudioSource, ProtocolError, ServerMessage};
+    use super::{
+        parse_server_message, serialize_hello, serialize_start_session, AssistModeConfiguration,
+        AudioSource, ProtocolError, ServerMessage, SimplificationLevel,
+    };
     use uuid::Uuid;
 
     #[test]
@@ -622,6 +658,70 @@ mod tests {
             parse_server_message(&unsupported),
             Err(ProtocolError::UnsupportedLimit)
         ));
+    }
+
+    #[test]
+    fn serializes_a_validated_assist_mode_configuration() {
+        let configuration = AssistModeConfiguration {
+            enabled: true,
+            translation_enabled: true,
+            simplification_enabled: true,
+            simplification_level: Some(SimplificationLevel::B2),
+            reply_coaching_enabled: true,
+        };
+        let payload = serialize_start_session(
+            Uuid::nil(),
+            Uuid::nil(),
+            Some("de"),
+            AudioSource::Mixed,
+            &configuration,
+        )
+        .expect("configuration serializes");
+
+        assert!(payload.contains(r#""assist_mode":{"enabled":true,"translation_enabled":true,"simplification_enabled":true,"simplification_level":"b2","reply_coaching_enabled":true}"#));
+        assert!(!payload.contains("token"));
+    }
+
+    #[test]
+    fn rejects_invalid_simplification_configuration() {
+        let configuration = AssistModeConfiguration {
+            enabled: true,
+            translation_enabled: true,
+            simplification_enabled: true,
+            simplification_level: None,
+            reply_coaching_enabled: false,
+        };
+        assert!(matches!(
+            serialize_start_session(
+                Uuid::nil(),
+                Uuid::nil(),
+                None,
+                AudioSource::Mixed,
+                &configuration,
+            ),
+            Err(ProtocolError::InvalidMessage)
+        ));
+    }
+
+    #[test]
+    fn serializes_disabled_assist_mode_with_a_null_level() {
+        let configuration = AssistModeConfiguration {
+            enabled: false,
+            translation_enabled: false,
+            simplification_enabled: false,
+            simplification_level: None,
+            reply_coaching_enabled: false,
+        };
+        let payload = serialize_start_session(
+            Uuid::nil(),
+            Uuid::nil(),
+            None,
+            AudioSource::Mixed,
+            &configuration,
+        )
+        .expect("disabled configuration serializes");
+
+        assert!(payload.contains(r#""assist_mode":{"enabled":false,"translation_enabled":false,"simplification_enabled":false,"simplification_level":null,"reply_coaching_enabled":false}"#));
     }
 
     #[test]

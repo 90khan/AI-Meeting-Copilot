@@ -8,7 +8,7 @@ use std::{
 };
 
 use futures_util::{SinkExt, StreamExt};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::State;
 use thiserror::Error;
 use tokio::{
@@ -28,7 +28,7 @@ use super::{
     binary_frames::{build_audio_chunk_frame, AudioChunkFrameMetadata, BinaryFrameError},
     protocol::{
         parse_server_message, serialize_end_session, serialize_hello, serialize_start_session,
-        AudioSource, ServerMessage,
+        AssistModeConfiguration, AudioSource, ServerMessage,
     },
 };
 
@@ -91,6 +91,7 @@ struct ActiveSession {
     anchor_monotonic_seconds: f64,
     anchor_utc_unix_seconds: i64,
     last_capture_started_at_seconds: f64,
+    assist_mode: AssistModeConfiguration,
 }
 
 struct PendingStart {
@@ -275,11 +276,13 @@ impl LiveTranscriptionClient {
         meeting_id: Uuid,
         language_hint: Option<&str>,
         source: AudioSource,
+        assist_mode: AssistModeConfiguration,
     ) -> Result<(), LiveTranscriptionClientError> {
         let _operation = self.operation_lock.lock().await;
         let request_id = Uuid::new_v4();
-        let control = serialize_start_session(request_id, meeting_id, language_hint, source)
-            .map_err(|_| LiveTranscriptionClientError::ProtocolFailed)?;
+        let control =
+            serialize_start_session(request_id, meeting_id, language_hint, source, &assist_mode)
+                .map_err(|_| LiveTranscriptionClientError::ProtocolFailed)?;
         let (writer, receiver) = {
             let mut state = self.state.lock().await;
             if state.status != LiveTranscriptionLifecycleStatus::Connected
@@ -326,6 +329,7 @@ impl LiveTranscriptionClient {
                         .map_err(|_| LiveTranscriptionClientError::InvalidTimestamp)?
                         .as_secs() as i64,
                     last_capture_started_at_seconds: 0.0,
+                    assist_mode,
                 });
                 Ok(())
             }
@@ -582,6 +586,34 @@ impl LiveTranscriptionClient {
         session.in_flight = false;
         Ok(())
     }
+}
+
+/// Public, secret-free input for a one-session configuration snapshot.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartLiveTranscriptionSessionInput {
+    meeting_id: Uuid,
+    language_hint: Option<String>,
+    source: AudioSource,
+    assist_mode: AssistModeConfiguration,
+}
+
+/// Start a session with configuration fixed for its entire lifecycle.
+#[tauri::command]
+pub async fn start_live_transcription_session(
+    client: State<'_, LiveTranscriptionClient>,
+    input: StartLiveTranscriptionSessionInput,
+) -> Result<LiveTranscriptionStatus, String> {
+    client
+        .start_session(
+            input.meeting_id,
+            input.language_hint.as_deref(),
+            input.source,
+            input.assist_mode,
+        )
+        .await
+        .map_err(|_| "The live transcription session could not be started.".to_owned())?;
+    Ok(client.status().await)
 }
 
 /// Connect to the local backend without ever exposing sidecar secrets to JavaScript.
@@ -939,8 +971,8 @@ mod tests {
         live_transcription::{
             binary_frames::AudioChunkFrameMetadata,
             protocol::{
-                AudioSource, ChunkResponse, ChunkResultSegment, ServerMessage, SessionStarted,
-                SessionStopped,
+                AssistModeConfiguration, AudioSource, ChunkResponse, ChunkResultSegment,
+                ServerMessage, SessionStarted, SessionStopped,
             },
         },
     };
@@ -1029,6 +1061,13 @@ mod tests {
                 anchor_monotonic_seconds: 0.0,
                 anchor_utc_unix_seconds: 0,
                 last_capture_started_at_seconds: 0.0,
+                assist_mode: AssistModeConfiguration {
+                    enabled: false,
+                    translation_enabled: false,
+                    simplification_enabled: false,
+                    simplification_level: None,
+                    reply_coaching_enabled: false,
+                },
             }),
             ..ClientState::default()
         };
