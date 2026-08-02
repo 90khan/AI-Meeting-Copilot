@@ -5,9 +5,13 @@ from typing import Self
 
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.application.interfaces.recording_repository import RecordingRepository
 from app.domain.repositories import MeetingRepository
 from app.infrastructure.persistence.sqlalchemy.meeting_repository import (
     SQLAlchemyMeetingRepository,
+)
+from app.infrastructure.persistence.sqlalchemy.recording_repository import (
+    SQLAlchemyRecordingRepository,
 )
 
 
@@ -20,6 +24,7 @@ class SQLAlchemyUnitOfWork:
         self._session_factory = session_factory
         self._session: Session | None = None
         self._meetings: SQLAlchemyMeetingRepository | None = None
+        self._recordings: SQLAlchemyRecordingRepository | None = None
 
     @property
     def meetings(self) -> MeetingRepository:
@@ -29,6 +34,14 @@ class SQLAlchemyUnitOfWork:
             raise RuntimeError("Unit of Work is not active.")
 
         return self._meetings
+
+    @property
+    def recordings(self) -> RecordingRepository:
+        """Return the active recording metadata repository."""
+
+        if self._recordings is None:
+            raise RuntimeError("Unit of Work is not active.")
+        return self._recordings
 
     @property
     def session(self) -> Session:
@@ -45,6 +58,7 @@ class SQLAlchemyUnitOfWork:
         session = self._session_factory()
         self._session = session
         self._meetings = SQLAlchemyMeetingRepository(session)
+        self._recordings = SQLAlchemyRecordingRepository(session)
         return self
 
     async def __aexit__(
@@ -62,6 +76,7 @@ class SQLAlchemyUnitOfWork:
         finally:
             session.close()
             self._meetings = None
+            self._recordings = None
             self._session = None
 
     async def commit(self) -> None:

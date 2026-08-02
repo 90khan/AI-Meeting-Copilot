@@ -7,6 +7,9 @@ import pytest
 from app.domain.entities import Meeting
 from app.infrastructure.database.base import Base
 from app.infrastructure.persistence.sqlalchemy import SQLAlchemyUnitOfWork
+from app.infrastructure.persistence.sqlalchemy.recording_repository import (
+    SQLAlchemyRecordingRepository,
+)
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -34,6 +37,25 @@ def test_context_creates_a_meeting_repository(
             assert active_unit_of_work.session is not None
 
     asyncio.run(exercise_context())
+
+
+def test_context_creates_a_session_bound_recording_repository(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """Recording metadata access follows the same active-context lifecycle."""
+
+    unit_of_work = SQLAlchemyUnitOfWork(session_factory)
+
+    async def exercise_context() -> None:
+        async with unit_of_work as active_unit_of_work:
+            assert isinstance(
+                active_unit_of_work.recordings, SQLAlchemyRecordingRepository
+            )
+
+    asyncio.run(exercise_context())
+
+    with pytest.raises(RuntimeError, match="not active"):
+        _ = unit_of_work.recordings
 
 
 def test_commit_persists_data(session_factory: sessionmaker[Session]) -> None:

@@ -5,6 +5,7 @@ from __future__ import annotations
 from types import TracebackType
 from typing import Protocol, Self
 
+from app.application.interfaces.recording_repository import RecordingRepository
 from app.domain.repositories import MeetingRepository
 
 
@@ -14,6 +15,12 @@ class UnitOfWork(Protocol):
     @property
     def meetings(self) -> MeetingRepository:
         """Return the Meeting repository bound to this work unit."""
+
+        ...
+
+    @property
+    def recordings(self) -> RecordingRepository:
+        """Return recording metadata storage bound to this work unit."""
 
         ...
 
