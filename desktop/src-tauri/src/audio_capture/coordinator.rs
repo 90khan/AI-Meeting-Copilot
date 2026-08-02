@@ -5,6 +5,7 @@ use tokio::sync::mpsc;
 
 use super::{
     bridge::{NativeAudioCaptureBridge, NativeAudioFrameSender},
+    chunker::{AudioChunk, AudioChunker, AudioChunkerError},
     processing::AudioFrameProcessor,
     status::{AudioCaptureState, AudioCaptureStatus},
     types::{AudioCaptureConfiguration, NativeAudioFrame},
@@ -16,6 +17,7 @@ pub(crate) struct AudioCaptureCoordinator<B: NativeAudioCaptureBridge> {
     bridge: B,
     receiver: Option<mpsc::Receiver<NativeAudioFrame>>,
     processor: AudioFrameProcessor,
+    chunker: AudioChunker,
     state: AudioCaptureState,
 }
 
@@ -25,6 +27,7 @@ impl<B: NativeAudioCaptureBridge> AudioCaptureCoordinator<B> {
             bridge,
             receiver: None,
             processor: AudioFrameProcessor::default(),
+            chunker: AudioChunker::default(),
             state: AudioCaptureState::Stopped,
         }
     }
@@ -63,6 +66,7 @@ impl<B: NativeAudioCaptureBridge> AudioCaptureCoordinator<B> {
         })?;
         self.receiver = None;
         self.processor.reset();
+        self.chunker.reset();
         self.state = AudioCaptureState::Stopped;
         self.status()
     }
@@ -78,6 +82,17 @@ impl<B: NativeAudioCaptureBridge> AudioCaptureCoordinator<B> {
             .map(|frame| self.processor.process(frame))
             .transpose()
             .map(Option::unwrap_or_default)
+    }
+
+    pub(crate) fn process_next_chunk(&mut self) -> Result<Vec<AudioChunk>, AudioChunkerError> {
+        let frames = self
+            .process_next_frame()
+            .map_err(|_| AudioChunkerError::InvalidTimeline)?;
+        let mut chunks = Vec::new();
+        for frame in frames {
+            chunks.extend(self.chunker.push(frame)?.chunks);
+        }
+        Ok(chunks)
     }
 
     pub(crate) fn status(&self) -> Result<AudioCaptureStatus, AudioCaptureCoordinatorError> {

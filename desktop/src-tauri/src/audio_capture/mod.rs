@@ -4,6 +4,7 @@
 
 pub(crate) mod authorization;
 pub(crate) mod bridge;
+pub(crate) mod chunker;
 pub(crate) mod coordinator;
 pub(crate) mod mixer;
 pub(crate) mod processing;
