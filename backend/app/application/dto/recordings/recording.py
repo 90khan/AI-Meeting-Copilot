@@ -91,7 +91,9 @@ class RecordingMetadata:
                 raise ApplicationValidationError(
                     "Manual retention cannot expire automatically."
                 )
-        elif self.expires_at is None or self.expires_at <= self.created_at:
+        elif self.state is not RecordingState.DELETED and (
+            self.expires_at is None or self.expires_at <= self.created_at
+        ):
             raise ApplicationValidationError(
                 "Timed retention requires a future expiry."
             )

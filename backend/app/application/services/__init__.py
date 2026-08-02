@@ -7,6 +7,12 @@ from app.application.services.assist_mode_orchestrator import (
     AssistUpdateSink,
 )
 from app.application.services.recent_transcript_context import RecentTranscriptContext
+from app.application.services.recording_deletion_state import (
+    mark_deleted,
+    mark_deleting,
+    mark_deletion_failed,
+    mark_storage_missing,
+)
 from app.application.services.transcript_deduplicator import TranscriptDeduplicator
 
 __all__ = [
@@ -16,4 +22,8 @@ __all__ = [
     "AssistUpdateSink",
     "RecentTranscriptContext",
     "TranscriptDeduplicator",
+    "mark_deleted",
+    "mark_deleting",
+    "mark_deletion_failed",
+    "mark_storage_missing",
 ]
