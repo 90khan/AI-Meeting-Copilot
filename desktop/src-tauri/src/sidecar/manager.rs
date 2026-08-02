@@ -55,6 +55,16 @@ pub enum SidecarError {
     AlreadyRunning,
     #[error("The backend sidecar could not be started.")]
     StartupFailed,
+    #[error("The backend sidecar is not ready.")]
+    NotReady,
+}
+
+/// Internal connection data for local Rust components. This deliberately has
+/// no public serialization or debug representation because it contains a token.
+pub(crate) struct SidecarConnection {
+    pub(crate) host: String,
+    pub(crate) port: u16,
+    pub(crate) token: String,
 }
 
 struct ManagerState {
@@ -177,6 +187,28 @@ impl SidecarManager {
         self.refresh_crash_state().await;
         let state = self.state.lock().await;
         public_status(&state)
+    }
+
+    /// Return the active loopback connection details for an internal client.
+    pub(crate) async fn live_transcription_connection(
+        &self,
+    ) -> Result<SidecarConnection, SidecarError> {
+        self.refresh_crash_state().await;
+        let state = self.state.lock().await;
+        if state.status != LifecycleStatus::Ready {
+            return Err(SidecarError::NotReady);
+        }
+
+        match (&state.host, state.port, &state.token) {
+            (Some(host), Some(port), Some(token)) if host == SIDECAR_HOST && port > 0 => {
+                Ok(SidecarConnection {
+                    host: host.clone(),
+                    port,
+                    token: token.clone(),
+                })
+            }
+            _ => Err(SidecarError::NotReady),
+        }
     }
 
     async fn readiness_and_health(
