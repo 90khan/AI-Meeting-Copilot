@@ -27,6 +27,7 @@ from app.application.use_cases import (
     EndMeetingUseCase,
     ProcessLiveAudioChunkUseCase,
     RenameMeetingUseCase,
+    StartLiveTranscriptionSessionUseCase,
     StartMeetingUseCase,
 )
 from app.core.config import Settings
@@ -303,6 +304,14 @@ class Container:
             buffer=BoundedAudioChunkBuffer(max_size=3),
             processor=self.get_process_live_audio_chunk_use_case(),
         )
+
+    def get_start_live_transcription_session_use_case(
+        self,
+    ) -> StartLiveTranscriptionSessionUseCase:
+        """Create the validation-only live-transcription session use case."""
+
+        self._require_session_factory()
+        return StartLiveTranscriptionSessionUseCase(self.get_unit_of_work)
 
     def get_start_meeting_use_case(self) -> StartMeetingUseCase:
         """Create a Unit-of-Work-backed Meeting start use case."""

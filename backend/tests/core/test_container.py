@@ -9,6 +9,7 @@ from app.application.use_cases import (
     EndMeetingUseCase,
     ProcessLiveAudioChunkUseCase,
     RenameMeetingUseCase,
+    StartLiveTranscriptionSessionUseCase,
     StartMeetingUseCase,
 )
 from app.core.config import Settings
@@ -119,6 +120,10 @@ def test_use_case_factories_return_working_use_cases_after_start() -> None:
     assert isinstance(container.get_start_meeting_use_case(), StartMeetingUseCase)
     assert isinstance(container.get_rename_meeting_use_case(), RenameMeetingUseCase)
     assert isinstance(container.get_end_meeting_use_case(), EndMeetingUseCase)
+    assert isinstance(
+        container.get_start_live_transcription_session_use_case(),
+        StartLiveTranscriptionSessionUseCase,
+    )
 
     asyncio.run(container.stop())
 
@@ -136,6 +141,8 @@ def test_use_case_factories_raise_before_start() -> None:
         container.get_process_live_audio_chunk_use_case()
     with pytest.raises(RuntimeError, match="has not been started"):
         container.get_live_transcription_session()
+    with pytest.raises(RuntimeError, match="has not been started"):
+        container.get_start_live_transcription_session_use_case()
     with pytest.raises(RuntimeError, match="has not been started"):
         container.get_sidecar_token_validator()
     with pytest.raises(RuntimeError, match="has not been started"):

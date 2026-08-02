@@ -17,6 +17,12 @@ from app.application.dto.process_live_audio_chunk_command import (
     ProcessLiveAudioChunkCommand,
 )
 from app.application.dto.rename_meeting_command import RenameMeetingCommand
+from app.application.dto.start_live_transcription_session_command import (
+    StartLiveTranscriptionSessionCommand,
+)
+from app.application.dto.start_live_transcription_session_result import (
+    StartLiveTranscriptionSessionResult,
+)
 from app.application.dto.start_meeting_command import StartMeetingCommand
 
 __all__ = [
@@ -33,5 +39,7 @@ __all__ = [
     "ProcessLiveAudioChunkCommand",
     "ProcessedTranscriptSegment",
     "RenameMeetingCommand",
+    "StartLiveTranscriptionSessionCommand",
+    "StartLiveTranscriptionSessionResult",
     "StartMeetingCommand",
 ]

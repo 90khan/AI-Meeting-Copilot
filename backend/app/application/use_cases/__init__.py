@@ -7,6 +7,9 @@ from app.application.use_cases.process_live_audio_chunk import (
     ProcessLiveAudioChunkUseCase,
 )
 from app.application.use_cases.rename_meeting import RenameMeetingUseCase
+from app.application.use_cases.start_live_transcription_session import (
+    StartLiveTranscriptionSessionUseCase,
+)
 from app.application.use_cases.start_meeting import StartMeetingUseCase
 
 __all__ = [
@@ -15,5 +18,6 @@ __all__ = [
     "EndMeetingUseCase",
     "ProcessLiveAudioChunkUseCase",
     "RenameMeetingUseCase",
+    "StartLiveTranscriptionSessionUseCase",
     "StartMeetingUseCase",
 ]
