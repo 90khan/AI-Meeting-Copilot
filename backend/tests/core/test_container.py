@@ -7,6 +7,7 @@ from app.application.use_cases import (
     AddTranscriptUseCase,
     CreateMeetingUseCase,
     EndMeetingUseCase,
+    ProcessLiveAudioChunkUseCase,
     RenameMeetingUseCase,
     StartMeetingUseCase,
 )
@@ -131,8 +132,26 @@ def test_use_case_factories_raise_before_start() -> None:
     with pytest.raises(RuntimeError, match="has not been started"):
         container.get_add_transcript_use_case()
     with pytest.raises(RuntimeError, match="has not been started"):
+        container.get_process_live_audio_chunk_use_case()
+    with pytest.raises(RuntimeError, match="has not been started"):
         container.get_start_meeting_use_case()
     with pytest.raises(RuntimeError, match="has not been started"):
         container.get_rename_meeting_use_case()
     with pytest.raises(RuntimeError, match="has not been started"):
         container.get_end_meeting_use_case()
+
+
+def test_live_audio_chunk_factory_works_with_registered_speech_provider() -> None:
+    """A started container wires the live-audio use case through its STT resolver."""
+
+    container = Container(Settings(database_url="sqlite+pysqlite:///:memory:"))
+    container.register_speech_to_text_provider_factory(lambda: object())  # type: ignore[arg-type]
+    asyncio.run(container.start())
+
+    try:
+        assert isinstance(
+            container.get_process_live_audio_chunk_use_case(),
+            ProcessLiveAudioChunkUseCase,
+        )
+    finally:
+        asyncio.run(container.stop())

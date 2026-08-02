@@ -20,10 +20,12 @@ from app.application.interfaces import (
     TranslationProviderFactory,
     UnitOfWork,
 )
+from app.application.services import TranscriptDeduplicator
 from app.application.use_cases import (
     AddTranscriptUseCase,
     CreateMeetingUseCase,
     EndMeetingUseCase,
+    ProcessLiveAudioChunkUseCase,
     RenameMeetingUseCase,
     StartMeetingUseCase,
 )
@@ -255,6 +257,18 @@ class Container:
 
         self._require_session_factory()
         return AddTranscriptUseCase(self.get_unit_of_work)
+
+    def get_process_live_audio_chunk_use_case(
+        self,
+    ) -> ProcessLiveAudioChunkUseCase:
+        """Create a live-audio chunk processor from active application dependencies."""
+
+        self._require_session_factory()
+        return ProcessLiveAudioChunkUseCase(
+            speech_to_text_provider=self.get_speech_to_text_provider(),
+            transcript_deduplicator=TranscriptDeduplicator(),
+            add_transcript_use_case=self.get_add_transcript_use_case(),
+        )
 
     def get_start_meeting_use_case(self) -> StartMeetingUseCase:
         """Create a Unit-of-Work-backed Meeting start use case."""
