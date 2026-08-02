@@ -23,6 +23,13 @@ from app.application.dto.live_transcription import (
 from app.application.dto.process_live_audio_chunk_command import (
     ProcessLiveAudioChunkCommand,
 )
+from app.application.dto.recordings import (
+    RecordingDeletionStatus,
+    RecordingMetadata,
+    RecordingMetadataRecord,
+    RecordingRetentionPolicy,
+    RecordingState,
+)
 from app.application.dto.rename_meeting_command import RenameMeetingCommand
 from app.application.dto.start_live_transcription_session_command import (
     StartLiveTranscriptionSessionCommand,
@@ -48,6 +55,11 @@ __all__ = [
     "LiveTranscriptionStatusKind",
     "ProcessLiveAudioChunkCommand",
     "ProcessedTranscriptSegment",
+    "RecordingDeletionStatus",
+    "RecordingMetadata",
+    "RecordingMetadataRecord",
+    "RecordingRetentionPolicy",
+    "RecordingState",
     "RenameMeetingCommand",
     "ReplyContext",
     "StartLiveTranscriptionSessionCommand",

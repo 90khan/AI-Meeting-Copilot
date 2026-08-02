@@ -2,8 +2,16 @@
 
 from app.infrastructure.persistence.sqlalchemy.models.meeting_model import MeetingModel
 from app.infrastructure.persistence.sqlalchemy.models.mixins import TimestampMixin
+from app.infrastructure.persistence.sqlalchemy.models.recording_metadata_model import (
+    RecordingMetadataModel,
+)
 from app.infrastructure.persistence.sqlalchemy.models.transcript_entry_model import (
     TranscriptEntryModel,
 )
 
-__all__ = ["MeetingModel", "TimestampMixin", "TranscriptEntryModel"]
+__all__ = [
+    "MeetingModel",
+    "RecordingMetadataModel",
+    "TimestampMixin",
+    "TranscriptEntryModel",
+]
