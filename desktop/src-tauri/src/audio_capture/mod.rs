@@ -5,6 +5,9 @@
 pub(crate) mod authorization;
 pub(crate) mod bridge;
 pub(crate) mod coordinator;
+pub(crate) mod mixer;
+pub(crate) mod processing;
+pub(crate) mod resampler;
 pub(crate) mod sources;
 pub(crate) mod status;
 pub(crate) mod swift_bridge;

@@ -5,6 +5,7 @@ use tokio::sync::mpsc;
 
 use super::{
     bridge::{NativeAudioCaptureBridge, NativeAudioFrameSender},
+    processing::AudioFrameProcessor,
     status::{AudioCaptureState, AudioCaptureStatus},
     types::{AudioCaptureConfiguration, NativeAudioFrame},
 };
@@ -14,6 +15,7 @@ const NATIVE_FRAME_BUFFER_CAPACITY: usize = 8;
 pub(crate) struct AudioCaptureCoordinator<B: NativeAudioCaptureBridge> {
     bridge: B,
     receiver: Option<mpsc::Receiver<NativeAudioFrame>>,
+    processor: AudioFrameProcessor,
     state: AudioCaptureState,
 }
 
@@ -22,6 +24,7 @@ impl<B: NativeAudioCaptureBridge> AudioCaptureCoordinator<B> {
         Self {
             bridge,
             receiver: None,
+            processor: AudioFrameProcessor::default(),
             state: AudioCaptureState::Stopped,
         }
     }
@@ -59,12 +62,22 @@ impl<B: NativeAudioCaptureBridge> AudioCaptureCoordinator<B> {
             AudioCaptureCoordinatorError::StopFailed
         })?;
         self.receiver = None;
+        self.processor.reset();
         self.state = AudioCaptureState::Stopped;
         self.status()
     }
 
     pub(crate) fn try_receive_frame(&mut self) -> Option<NativeAudioFrame> {
         self.receiver.as_mut()?.try_recv().ok()
+    }
+
+    pub(crate) fn process_next_frame(
+        &mut self,
+    ) -> Result<Vec<super::mixer::MixedAudioFrame>, super::resampler::AudioProcessingError> {
+        self.try_receive_frame()
+            .map(|frame| self.processor.process(frame))
+            .transpose()
+            .map(Option::unwrap_or_default)
     }
 
     pub(crate) fn status(&self) -> Result<AudioCaptureStatus, AudioCaptureCoordinatorError> {
