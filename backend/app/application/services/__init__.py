@@ -13,6 +13,9 @@ from app.application.services.recording_deletion_state import (
     mark_deletion_failed,
     mark_storage_missing,
 )
+from app.application.services.recording_retention_cleanup import (
+    RecordingRetentionCleanupService,
+)
 from app.application.services.transcript_deduplicator import TranscriptDeduplicator
 
 __all__ = [
@@ -21,6 +24,7 @@ __all__ = [
     "AssistModeOrchestrator",
     "AssistUpdateSink",
     "RecentTranscriptContext",
+    "RecordingRetentionCleanupService",
     "TranscriptDeduplicator",
     "mark_deleted",
     "mark_deleting",
