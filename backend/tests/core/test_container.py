@@ -137,6 +137,8 @@ def test_use_case_factories_raise_before_start() -> None:
     with pytest.raises(RuntimeError, match="has not been started"):
         container.get_live_transcription_session()
     with pytest.raises(RuntimeError, match="has not been started"):
+        container.get_sidecar_token_validator()
+    with pytest.raises(RuntimeError, match="has not been started"):
         container.get_start_meeting_use_case()
     with pytest.raises(RuntimeError, match="has not been started"):
         container.get_rename_meeting_use_case()

@@ -6,7 +6,7 @@ from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlparse
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -57,6 +57,7 @@ class Settings(BaseSettings):
     ollama_temperature: float = 0.1
     ollama_context_length: int = 8192
     ollama_keep_alive: str = "5m"
+    sidecar_auth_token: str | None = Field(default=None, repr=False)
 
     @field_validator(
         "speech_to_text_provider",
@@ -196,6 +197,20 @@ class Settings(BaseSettings):
         normalized_value = value.strip()
         if not normalized_value:
             raise ValueError("Ollama keep_alive must not be blank.")
+        return normalized_value
+
+    @field_validator("sidecar_auth_token", mode="before")
+    @classmethod
+    def normalize_sidecar_auth_token(cls, value: str | None) -> str | None:
+        """Trim an optional sidecar token while rejecting blank configuration."""
+
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("Sidecar authentication token must be a string.")
+        normalized_value = value.strip()
+        if not normalized_value:
+            raise ValueError("Sidecar authentication token must not be blank.")
         return normalized_value
 
 

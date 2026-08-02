@@ -31,6 +31,7 @@ from app.application.use_cases import (
 )
 from app.core.config import Settings
 from app.core.logging import get_logger, setup_logging
+from app.core.sidecar_auth import SidecarTokenValidator
 from app.infrastructure.audio import (
     BoundedAudioChunkBuffer,
     BufferedLiveTranscriptionSession,
@@ -82,6 +83,7 @@ class Container:
         self._ollama_meeting_summarization_provider: (
             MeetingSummarizationProvider | None
         ) = None
+        self._sidecar_token_validator: SidecarTokenValidator | None = None
         self._is_started = False
         setup_logging(settings)
 
@@ -113,6 +115,7 @@ class Container:
         finally:
             self._faster_whisper_speech_to_text_provider = None
             self._faster_whisper_model_manager = None
+            self._sidecar_token_validator = None
             try:
                 try:
                     await self._dispose_ollama_resources()
@@ -130,6 +133,24 @@ class Container:
         """Return a module-qualified logger configured by this container."""
 
         return get_logger(name)
+
+    def get_sidecar_token_validator(self) -> SidecarTokenValidator:
+        """Return this lifecycle's configured local-sidecar token validator."""
+
+        self._require_started()
+        validator = self._sidecar_token_validator
+        if validator is not None:
+            return validator
+
+        token = self._settings.sidecar_auth_token
+        if token is None:
+            raise RuntimeError(
+                "Sidecar authentication requires AI_MEETING_COPILOT_SIDECAR_AUTH_TOKEN."
+            )
+
+        validator = SidecarTokenValidator(expected_token=token)
+        self._sidecar_token_validator = validator
+        return validator
 
     def register_speech_to_text_provider_factory(
         self, factory: SpeechToTextProviderFactory
@@ -440,6 +461,7 @@ class Container:
         finally:
             self._faster_whisper_speech_to_text_provider = None
             self._faster_whisper_model_manager = None
+            self._sidecar_token_validator = None
             self._dispose_persistence_resources()
 
     async def _dispose_ollama_resources(self) -> None:

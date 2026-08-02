@@ -174,6 +174,33 @@ def test_ollama_settings_use_local_defaults() -> None:
     assert settings.ollama_keep_alive == "5m"
 
 
+def test_sidecar_auth_token_defaults_to_unconfigured() -> None:
+    """The backend never generates a desktop-sidecar token itself."""
+
+    assert Settings().sidecar_auth_token is None
+
+
+def test_sidecar_auth_token_reads_and_normalizes_environment_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The token uses the existing application prefix and trims whitespace."""
+
+    monkeypatch.setenv("AI_MEETING_COPILOT_SIDECAR_AUTH_TOKEN", " local-token ")
+
+    settings = Settings()
+
+    assert settings.sidecar_auth_token == "local-token"
+    assert "local-token" not in repr(settings)
+
+
+@pytest.mark.parametrize("token", ["", "   "])
+def test_sidecar_auth_token_rejects_blank_configuration(token: str) -> None:
+    """Whitespace cannot accidentally disable sidecar authentication."""
+
+    with pytest.raises(ValidationError, match="Sidecar authentication token"):
+        Settings(sidecar_auth_token=token)
+
+
 def test_ollama_settings_read_prefixed_environment_overrides(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -267,3 +294,6 @@ def test_settings_remain_immutable() -> None:
 
     with pytest.raises(ValidationError):
         settings.ollama_base_url = "http://localhost:11434"  # type: ignore[misc]
+
+    with pytest.raises(ValidationError):
+        settings.sidecar_auth_token = "replacement"  # type: ignore[misc]
