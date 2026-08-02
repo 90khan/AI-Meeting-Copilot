@@ -23,15 +23,23 @@ from app.application.interfaces import (
     TranslationProviderFactory,
     UnitOfWork,
 )
-from app.application.services import TranscriptDeduplicator
+from app.application.services import (
+    AssistModeConfiguration,
+    AssistModeOrchestrator,
+    AssistUpdateSink,
+    TranscriptDeduplicator,
+)
 from app.application.use_cases import (
     AddTranscriptUseCase,
     CreateMeetingUseCase,
     EndMeetingUseCase,
+    GenerateReplySuggestionsUseCase,
     ProcessLiveAudioChunkUseCase,
     RenameMeetingUseCase,
+    SimplifyTranscriptSegmentUseCase,
     StartLiveTranscriptionSessionUseCase,
     StartMeetingUseCase,
+    TranslateTranscriptSegmentUseCase,
 )
 from app.core.config import Settings
 from app.core.logging import get_logger, setup_logging
@@ -298,6 +306,54 @@ class Container:
             speech_to_text_provider=self.get_speech_to_text_provider(),
             transcript_deduplicator=TranscriptDeduplicator(),
             add_transcript_use_case=self.get_add_transcript_use_case(),
+        )
+
+    def get_translate_transcript_segment_use_case(
+        self,
+    ) -> TranslateTranscriptSegmentUseCase:
+        """Create the Turkish translation use case for transient Assist Mode."""
+
+        self._require_started()
+        return TranslateTranscriptSegmentUseCase(
+            provider=self.get_translation_provider(),
+            target_language=LanguageCode(value="tr"),
+        )
+
+    def get_simplify_transcript_segment_use_case(
+        self,
+    ) -> SimplifyTranscriptSegmentUseCase:
+        """Create the German simplification use case for transient Assist Mode."""
+
+        self._require_started()
+        return SimplifyTranscriptSegmentUseCase(
+            provider=self.get_german_simplification_provider()
+        )
+
+    def get_generate_reply_suggestions_use_case(
+        self,
+    ) -> GenerateReplySuggestionsUseCase:
+        """Create the reply-coaching use case for transient Assist Mode."""
+
+        self._require_started()
+        return GenerateReplySuggestionsUseCase(
+            provider=self.get_reply_coaching_provider()
+        )
+
+    def get_assist_mode_orchestrator(
+        self,
+        *,
+        configuration: AssistModeConfiguration,
+        update_sink: AssistUpdateSink,
+    ) -> AssistModeOrchestrator:
+        """Create one non-persistent Assist Mode orchestrator for a live session."""
+
+        self._require_started()
+        return AssistModeOrchestrator(
+            configuration=configuration,
+            translation_use_case=self.get_translate_transcript_segment_use_case(),
+            simplification_use_case=self.get_simplify_transcript_segment_use_case(),
+            reply_suggestions_use_case=self.get_generate_reply_suggestions_use_case(),
+            update_sink=update_sink,
         )
 
     def get_live_transcription_session(

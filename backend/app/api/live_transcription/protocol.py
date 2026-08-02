@@ -5,7 +5,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from uuid import UUID
 
-from app.application.dto.ai import LanguageCode
+from app.application.dto.ai import GermanLevel, LanguageCode
 from app.application.dto.live_transcription import AudioSource
 from app.application.exceptions import ApplicationValidationError
 from app.domain.value_objects import MeetingId
@@ -15,6 +15,40 @@ AUDIO_FRAME_MAGIC = b"AMCP"
 AUDIO_MESSAGE_KIND = 1
 DEFAULT_MAX_BINARY_PAYLOAD_BYTES = 524_288
 DEFAULT_MAX_IN_FLIGHT_CHUNKS = 1
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class AssistModeSessionConfiguration:
+    """Client-selected, provider-agnostic Assist Mode settings for one session."""
+
+    enabled: bool
+    translation_enabled: bool
+    simplification_enabled: bool
+    simplification_level: GermanLevel | None
+    reply_coaching_enabled: bool
+
+    def __post_init__(self) -> None:
+        """Validate the minimal V1 assist configuration without provider names."""
+
+        if not all(
+            isinstance(value, bool)
+            for value in (
+                self.enabled,
+                self.translation_enabled,
+                self.simplification_enabled,
+                self.reply_coaching_enabled,
+            )
+        ):
+            raise ApplicationValidationError("Assist Mode flags must be booleans.")
+        if self.simplification_enabled:
+            if self.simplification_level not in {GermanLevel.B1, GermanLevel.B2}:
+                raise ApplicationValidationError(
+                    "Assist Mode simplification level must be B1 or B2."
+                )
+        elif self.simplification_level is not None:
+            raise ApplicationValidationError(
+                "Assist Mode simplification level is not applicable."
+            )
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -58,6 +92,7 @@ class StartSessionMessage:
     meeting_id: MeetingId
     language_hint: LanguageCode | None
     source: AudioSource
+    assist_mode: AssistModeSessionConfiguration | None = None
 
     def __post_init__(self) -> None:
         _validate_protocol_version(self.version)
@@ -69,6 +104,10 @@ class StartSessionMessage:
             raise ApplicationValidationError("Language hint must be a LanguageCode.")
         if not isinstance(self.source, AudioSource):
             raise ApplicationValidationError("Audio source is invalid.")
+        if self.assist_mode is not None and not isinstance(
+            self.assist_mode, AssistModeSessionConfiguration
+        ):
+            raise ApplicationValidationError("Assist Mode configuration is invalid.")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -221,6 +260,7 @@ def _message_to_payload(
             meeting_id=meeting_id,
             language_hint=language_hint,
             source=source,
+            assist_mode=assist_mode,
         ):
             payload.update(
                 request_id=str(request_id),
@@ -230,6 +270,8 @@ def _message_to_payload(
                 ),
                 source=source.value,
             )
+            if assist_mode is not None:
+                payload["assist_mode"] = _assist_mode_to_payload(assist_mode)
         case SessionStartedMessage(
             request_id=request_id,
             session_id=session_id,
@@ -298,18 +340,25 @@ def _parse_hello_ack(data: dict[str, object]) -> HelloAckMessage:
 
 
 def _parse_start_session(data: dict[str, object]) -> StartSessionMessage:
-    _require_fields(
-        data,
-        {
-            "type",
-            "version",
-            "request_id",
-            "meeting_id",
-            "language_hint",
-            "source",
-        },
-    )
+    required_fields = {
+        "type",
+        "version",
+        "request_id",
+        "meeting_id",
+        "language_hint",
+        "source",
+    }
+    provided_fields = set(data)
+    if provided_fields != required_fields and provided_fields != (
+        required_fields | {"assist_mode"}
+    ):
+        raise ApplicationValidationError("Protocol message fields are invalid.")
     language_hint = _optional_language_code(data, "language_hint")
+    assist_mode = (
+        _assist_mode_configuration(data["assist_mode"])
+        if "assist_mode" in data
+        else None
+    )
     try:
         source = AudioSource(_require_string(data, "source"))
     except ValueError as error:
@@ -320,6 +369,7 @@ def _parse_start_session(data: dict[str, object]) -> StartSessionMessage:
         meeting_id=MeetingId(_parse_uuid(data, "meeting_id")),
         language_hint=language_hint,
         source=source,
+        assist_mode=assist_mode,
     )
 
 
@@ -447,6 +497,74 @@ def _optional_language_code(
     if data[field_name] is None:
         return None
     return LanguageCode(value=_require_string(data, field_name))
+
+
+def _assist_mode_to_payload(
+    configuration: AssistModeSessionConfiguration,
+) -> dict[str, object]:
+    """Convert a validated Assist Mode configuration to strict JSON primitives."""
+
+    return {
+        "enabled": configuration.enabled,
+        "translation_enabled": configuration.translation_enabled,
+        "simplification_enabled": configuration.simplification_enabled,
+        "simplification_level": (
+            configuration.simplification_level.value
+            if configuration.simplification_level is not None
+            else None
+        ),
+        "reply_coaching_enabled": configuration.reply_coaching_enabled,
+    }
+
+
+def _assist_mode_configuration(value: object) -> AssistModeSessionConfiguration:
+    """Parse the optional exact-shape Assist Mode configuration object."""
+
+    if not isinstance(value, dict):
+        raise ApplicationValidationError("Assist Mode configuration is invalid.")
+    expected = {
+        "enabled",
+        "translation_enabled",
+        "simplification_enabled",
+        "simplification_level",
+        "reply_coaching_enabled",
+    }
+    if set(value) != expected:
+        raise ApplicationValidationError(
+            "Assist Mode configuration fields are invalid."
+        )
+    simplification_level_value = value["simplification_level"]
+    try:
+        simplification_level = (
+            None
+            if simplification_level_value is None
+            else GermanLevel(_require_mapping_string(value, "simplification_level"))
+        )
+    except ValueError as error:
+        raise ApplicationValidationError(
+            "Assist Mode simplification level is invalid."
+        ) from error
+    return AssistModeSessionConfiguration(
+        enabled=_require_mapping_bool(value, "enabled"),
+        translation_enabled=_require_mapping_bool(value, "translation_enabled"),
+        simplification_enabled=_require_mapping_bool(value, "simplification_enabled"),
+        simplification_level=simplification_level,
+        reply_coaching_enabled=_require_mapping_bool(value, "reply_coaching_enabled"),
+    )
+
+
+def _require_mapping_string(data: dict[str, object], field_name: str) -> str:
+    value = data[field_name]
+    if not isinstance(value, str):
+        raise ApplicationValidationError("Assist Mode configuration is invalid.")
+    return value
+
+
+def _require_mapping_bool(data: dict[str, object], field_name: str) -> bool:
+    value = data[field_name]
+    if not isinstance(value, bool):
+        raise ApplicationValidationError("Assist Mode configuration is invalid.")
+    return value
 
 
 def _validate_protocol_version(version: int) -> None:

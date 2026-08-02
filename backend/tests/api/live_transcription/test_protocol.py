@@ -7,6 +7,7 @@ from uuid import UUID
 import pytest
 from app.api.live_transcription.protocol import (
     PROTOCOL_VERSION,
+    AssistModeSessionConfiguration,
     EndSessionMessage,
     HelloAckMessage,
     HelloMessage,
@@ -17,7 +18,7 @@ from app.api.live_transcription.protocol import (
     parse_protocol_message,
     serialize_protocol_message,
 )
-from app.application.dto.ai import LanguageCode
+from app.application.dto.ai import GermanLevel, LanguageCode
 from app.application.dto.live_transcription import AudioSource
 from app.application.exceptions import ApplicationValidationError
 from app.domain.value_objects import MeetingId
@@ -164,4 +165,67 @@ def test_non_positive_acknowledged_limits_are_rejected(limit: int) -> None:
             connection_id=_CONNECTION_ID,
             max_binary_payload_bytes=limit,
             max_in_flight_chunks=1,
+        )
+
+
+def test_start_session_assist_mode_round_trips_and_is_optional() -> None:
+    """The exact Assist Mode configuration is optional and provider-agnostic."""
+
+    configured = StartSessionMessage(
+        version=1,
+        request_id=_REQUEST_ID,
+        meeting_id=_MEETING_ID,
+        language_hint=None,
+        source=AudioSource.MIXED,
+        assist_mode=AssistModeSessionConfiguration(
+            enabled=True,
+            translation_enabled=True,
+            simplification_enabled=True,
+            simplification_level=GermanLevel.B1,
+            reply_coaching_enabled=True,
+        ),
+    )
+    serialized = serialize_protocol_message(configured)
+
+    assert parse_protocol_message(serialized) == configured
+    assert "assist_mode" in json.loads(serialized)
+    without_assist = json.dumps(
+        {
+            "type": "start_session",
+            "version": 1,
+            "request_id": str(_REQUEST_ID),
+            "meeting_id": str(_MEETING_ID),
+            "language_hint": None,
+            "source": "mixed",
+        }
+    )
+    parsed = parse_protocol_message(without_assist)
+    assert isinstance(parsed, StartSessionMessage)
+    assert parsed.assist_mode is None
+
+
+def test_assist_mode_configuration_rejects_invalid_levels_and_unknown_fields() -> None:
+    """Assist requests cannot select unsupported or contradictory V1 levels."""
+
+    with pytest.raises(ApplicationValidationError):
+        AssistModeSessionConfiguration(
+            enabled=True,
+            translation_enabled=True,
+            simplification_enabled=True,
+            simplification_level=GermanLevel.C1,
+            reply_coaching_enabled=True,
+        )
+    with pytest.raises(ApplicationValidationError):
+        parse_protocol_message(
+            json.dumps(
+                {
+                    "type": "start_session",
+                    "version": 1,
+                    "request_id": str(_REQUEST_ID),
+                    "meeting_id": str(_MEETING_ID),
+                    "language_hint": None,
+                    "source": "mixed",
+                    "assist_mode": {"enabled": True},
+                }
+            )
         )

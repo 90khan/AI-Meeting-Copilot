@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from app.api.live_transcription.assist_messages import WebSocketAssistUpdateSink
 from app.api.live_transcription.binary_frames import parse_audio_chunk_frame
 from app.api.live_transcription.protocol import (
     DEFAULT_MAX_BINARY_PAYLOAD_BYTES,
@@ -30,6 +31,7 @@ from app.application.dto import (
     LiveTranscriptionStatusKind,
 )
 from app.application.dto.ai import AudioInput
+from app.application.dto.assist_mode import TranscriptSegment
 from app.application.dto.start_live_transcription_session_command import (
     StartLiveTranscriptionSessionCommand,
 )
@@ -37,8 +39,13 @@ from app.application.exceptions import (
     ApplicationValidationError,
     ProviderAuthenticationError,
     ProviderError,
+    ProviderUnavailableError,
 )
 from app.application.interfaces import LiveTranscriptionSession
+from app.application.services import (
+    AssistModeConfiguration,
+    AssistModeOrchestrator,
+)
 from app.core.container import Container
 from app.domain.exceptions import InvalidStateTransitionError
 
@@ -67,7 +74,10 @@ async def live_transcription(websocket: WebSocket) -> None:
         return
 
     await websocket.accept()
+    send_lock = asyncio.Lock()
+    websocket.state.live_transcription_send_lock = send_lock
     active_session: LiveTranscriptionSession | None = None
+    assist_orchestrator: AssistModeOrchestrator | None = None
     session_id: UUID | None = None
     expected_sequence = 0
     sequence_violations = 0
@@ -153,6 +163,44 @@ async def live_transcription(websocket: WebSocket) -> None:
                             session_id=session_id,
                         ),
                     )
+                    if control.assist_mode is not None and control.assist_mode.enabled:
+                        try:
+                            assist_orchestrator = (
+                                container.get_assist_mode_orchestrator(
+                                    configuration=AssistModeConfiguration(
+                                        translation_enabled=(
+                                            control.assist_mode.translation_enabled
+                                        ),
+                                        simplification_enabled=(
+                                            control.assist_mode.simplification_enabled
+                                        ),
+                                        simplification_level=(
+                                            control.assist_mode.simplification_level
+                                        ),
+                                        reply_coaching_enabled=(
+                                            control.assist_mode.reply_coaching_enabled
+                                        ),
+                                    ),
+                                    update_sink=WebSocketAssistUpdateSink(
+                                        websocket=websocket,
+                                        send_lock=send_lock,
+                                        simplification_level=(
+                                            control.assist_mode.simplification_level
+                                        ),
+                                    ),
+                                )
+                            )
+                            await assist_orchestrator.start()
+                        except (ProviderUnavailableError, RuntimeError):
+                            assist_orchestrator = None
+                            await _send_protocol_error(
+                                websocket,
+                                code="assist_unavailable",
+                                message="Assist Mode is unavailable.",
+                                fatal=False,
+                                session_id=session_id,
+                                request_id=control.request_id,
+                            )
                     continue
 
                 if isinstance(control, EndSessionMessage):
@@ -185,6 +233,9 @@ async def live_transcription(websocket: WebSocket) -> None:
                         )
                         continue
 
+                    if assist_orchestrator is not None:
+                        await assist_orchestrator.stop()
+                        assist_orchestrator = None
                     await active_session.stop()
                     await _send_control(
                         websocket,
@@ -316,6 +367,21 @@ async def live_transcription(websocket: WebSocket) -> None:
             await _send_chunk_result(websocket, result)
             if result.status is not None:
                 await _send_status(websocket, result.status)
+            if assist_orchestrator is not None:
+                for processed_segment in result.accepted_segments:
+                    try:
+                        await assist_orchestrator.enqueue(
+                            TranscriptSegment(
+                                transcript_id=processed_segment.transcript_id,
+                                meeting_id=active_session.meeting_id,  # type: ignore[attr-defined]
+                                text=processed_segment.text,
+                                timestamp=processed_segment.timestamp,
+                                source=processed_segment.source,
+                                speaker=processed_segment.speaker,
+                            )
+                        )
+                    except RuntimeError:
+                        break
             expected_sequence += 1
     except WebSocketDisconnect:
         return
@@ -332,6 +398,8 @@ async def live_transcription(websocket: WebSocket) -> None:
             )
             await websocket.close(code=1011)
     finally:
+        if assist_orchestrator is not None:
+            await assist_orchestrator.stop()
         if active_session is not None:
             await active_session.stop()
 
@@ -401,7 +469,7 @@ async def _send_control(
 ) -> None:
     """Send an existing strict protocol control DTO."""
 
-    await websocket.send_text(serialize_protocol_message(message))
+    await _send_text(websocket, serialize_protocol_message(message))
 
 
 async def _send_protocol_error(
@@ -416,7 +484,8 @@ async def _send_protocol_error(
 ) -> None:
     """Send a control error that deliberately omits sensitive payload details."""
 
-    await websocket.send_text(
+    await _send_text(
+        websocket,
         serialize_protocol_message(
             ProtocolErrorMessage(
                 version=PROTOCOL_VERSION,
@@ -427,7 +496,7 @@ async def _send_protocol_error(
                 request_id=request_id,
                 expected_sequence=expected_sequence,
             )
-        )
+        ),
     )
 
 
@@ -437,7 +506,8 @@ async def _send_chunk_result(
 ) -> None:
     """Send one minimal JSON result for accepted finalized transcript segments."""
 
-    await websocket.send_text(
+    await _send_text(
+        websocket,
         json.dumps(
             {
                 "type": "chunk_result",
@@ -457,14 +527,15 @@ async def _send_chunk_result(
             },
             separators=(",", ":"),
             sort_keys=True,
-        )
+        ),
     )
 
 
 async def _send_status(websocket: WebSocket, status: LiveTranscriptionStatus) -> None:
     """Send one user-visible status without transport or provider details."""
 
-    await websocket.send_text(
+    await _send_text(
+        websocket,
         json.dumps(
             {
                 "type": "status",
@@ -475,7 +546,7 @@ async def _send_status(websocket: WebSocket, status: LiveTranscriptionStatus) ->
             },
             separators=(",", ":"),
             sort_keys=True,
-        )
+        ),
     )
 
 
@@ -483,3 +554,11 @@ def _serialize_timestamp(timestamp: datetime) -> str:
     """Render a UTC timestamp in the protocol's canonical Z form."""
 
     return timestamp.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+async def _send_text(websocket: WebSocket, payload: str) -> None:
+    """Serialize every connection-local outbound text frame through one lock."""
+
+    send_lock = cast(asyncio.Lock, websocket.state.live_transcription_send_lock)
+    async with send_lock:
+        await websocket.send_text(payload)

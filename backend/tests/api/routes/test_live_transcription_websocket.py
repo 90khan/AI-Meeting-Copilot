@@ -14,6 +14,7 @@ from app.api.live_transcription.binary_frames import (
     build_audio_chunk_frame,
 )
 from app.api.live_transcription.protocol import (
+    AssistModeSessionConfiguration,
     EndSessionMessage,
     HelloMessage,
     StartSessionMessage,
@@ -28,10 +29,15 @@ from app.application.dto import (
     ProcessedTranscriptSegment,
 )
 from app.application.dto.ai import AudioFormat, LanguageCode
+from app.application.dto.assist_mode import AssistCapability, AssistState, AssistUpdate
 from app.application.dto.start_live_transcription_session_result import (
     StartLiveTranscriptionSessionResult,
 )
-from app.application.exceptions import ProviderAuthenticationError, ProviderError
+from app.application.exceptions import (
+    ProviderAuthenticationError,
+    ProviderError,
+    ProviderUnavailableError,
+)
 from app.domain.exceptions import InvalidStateTransitionError
 from app.domain.value_objects import MeetingId
 from fastapi import FastAPI
@@ -112,6 +118,44 @@ class FakeSession:
         self.stop_call_count += 1
 
 
+class FakeAssistOrchestrator:
+    """Assist session fake that publishes one update after transcript delivery."""
+
+    def __init__(self, *, sink: object, enqueue_failure: bool = False) -> None:
+        """Bind a transport sink without creating real provider dependencies."""
+
+        self.sink = sink
+        self.enqueue_failure = enqueue_failure
+        self.started = False
+        self.stop_call_count = 0
+        self.enqueued: list[object] = []
+
+    async def start(self) -> None:
+        """Mark the fake as active."""
+
+        self.started = True
+
+    async def enqueue(self, segment: object) -> bool:
+        """Publish a generic processing update for the accepted segment."""
+
+        self.enqueued.append(segment)
+        if self.enqueue_failure:
+            raise RuntimeError("private enrichment failure")
+        await self.sink.publish(
+            AssistUpdate(
+                transcript_id=segment.transcript_id,  # type: ignore[attr-defined]
+                capability=AssistCapability.TRANSLATION,
+                state=AssistState.PROCESSING,
+            )
+        )
+        return True
+
+    async def stop(self) -> None:
+        """Track session shutdown."""
+
+        self.stop_call_count += 1
+
+
 class FakeContainer:
     """Container fake exposing only the endpoint's public dependencies."""
 
@@ -121,6 +165,8 @@ class FakeContainer:
         start_failure: Exception | None = None,
         outcomes: list[LiveTranscriptionChunkResult | Exception] | None = None,
         debug: bool = False,
+        assist_unavailable: bool = False,
+        assist_enqueue_failure: bool = False,
     ) -> None:
         """Initialize fake lifecycle dependencies and configuration tracking."""
 
@@ -128,7 +174,10 @@ class FakeContainer:
         self.start_use_case = FakeStartUseCase(start_failure)
         self.outcomes = outcomes or [_result(0)]
         self.debug = debug
+        self.assist_unavailable = assist_unavailable
+        self.assist_enqueue_failure = assist_enqueue_failure
         self.sessions: list[FakeSession] = []
+        self.assist_orchestrators: list[FakeAssistOrchestrator] = []
 
     def get_settings(self) -> SimpleNamespace:
         """Return the minimal origin-policy configuration."""
@@ -163,6 +212,24 @@ class FakeContainer:
         self.sessions.append(session)
         return session
 
+    def get_assist_mode_orchestrator(
+        self,
+        *,
+        configuration: object,
+        update_sink: object,
+    ) -> FakeAssistOrchestrator:
+        """Create a connection-local fake or simulate unavailable providers."""
+
+        del configuration
+        if self.assist_unavailable:
+            raise ProviderUnavailableError("private provider detail")
+        orchestrator = FakeAssistOrchestrator(
+            sink=update_sink,
+            enqueue_failure=self.assist_enqueue_failure,
+        )
+        self.assist_orchestrators.append(orchestrator)
+        return orchestrator
+
 
 def _app(container: FakeContainer) -> FastAPI:
     app = FastAPI()
@@ -177,7 +244,7 @@ def _hello(token: str = "valid-token") -> str:
     )
 
 
-def _start() -> str:
+def _start(*, assist_mode: AssistModeSessionConfiguration | None = None) -> str:
     return serialize_protocol_message(
         StartSessionMessage(
             version=1,
@@ -185,6 +252,7 @@ def _start() -> str:
             meeting_id=_MEETING_ID,
             language_hint=LanguageCode(value="de-DE"),
             source=AudioSource.MIXED,
+            assist_mode=assist_mode,
         )
     )
 
@@ -419,6 +487,80 @@ def test_oversized_payload_closes_with_1009() -> None:
 
     assert error.value.code == 1009
     assert container.sessions[0].chunks == []
+
+
+def test_assist_updates_follow_the_primary_chunk_result_and_stop_with_session() -> None:
+    """Persisted transcript IDs anchor async Assist updates after chunk delivery."""
+
+    assist_mode = AssistModeSessionConfiguration(
+        enabled=True,
+        translation_enabled=True,
+        simplification_enabled=False,
+        simplification_level=None,
+        reply_coaching_enabled=False,
+    )
+    container = FakeContainer()
+    with _client(_app(container)) as client:
+        with client.websocket_connect(_PATH) as websocket:
+            websocket.send_text(_hello())
+            websocket.receive_text()
+            websocket.send_text(_start(assist_mode=assist_mode))
+            session_id = UUID(json.loads(websocket.receive_text())["session_id"])
+
+            websocket.send_bytes(_frame(session_id, 0))
+            chunk_result = json.loads(websocket.receive_text())
+            assist_update = json.loads(websocket.receive_text())
+
+            assert chunk_result["type"] == "chunk_result"
+            assert assist_update == {
+                "capability": "translation",
+                "state": "processing",
+                "transcript_id": str(_TRANSCRIPT_ID),
+                "type": "assist_segment_update",
+                "version": 1,
+            }
+            websocket.send_text(_end(session_id, 0))
+            assert json.loads(websocket.receive_text())["type"] == "session_stopped"
+
+    assert container.assist_orchestrators[0].started is True
+    assert container.assist_orchestrators[0].stop_call_count == 1
+    assert (
+        container.assist_orchestrators[0].enqueued[0].transcript_id == _TRANSCRIPT_ID
+    )  # type: ignore[attr-defined]
+
+
+def test_assist_failures_do_not_break_transcription() -> None:
+    """Assist availability is isolated from transcript processing and persistence."""
+
+    assist_mode = AssistModeSessionConfiguration(
+        enabled=True,
+        translation_enabled=True,
+        simplification_enabled=False,
+        simplification_level=None,
+        reply_coaching_enabled=False,
+    )
+    unavailable = FakeContainer(assist_unavailable=True)
+    with _client(_app(unavailable)) as client:
+        with client.websocket_connect(_PATH) as websocket:
+            websocket.send_text(_hello())
+            websocket.receive_text()
+            websocket.send_text(_start(assist_mode=assist_mode))
+            session_id = UUID(json.loads(websocket.receive_text())["session_id"])
+            error = json.loads(websocket.receive_text())
+            assert error["code"] == "assist_unavailable"
+            assert "private provider detail" not in error["message"]
+            websocket.send_bytes(_frame(session_id, 0))
+            assert json.loads(websocket.receive_text())["type"] == "chunk_result"
+
+    failed_enqueue = FakeContainer(assist_enqueue_failure=True)
+    with _client(_app(failed_enqueue)) as client:
+        with client.websocket_connect(_PATH) as websocket:
+            websocket.send_text(_hello())
+            websocket.receive_text()
+            websocket.send_text(_start(assist_mode=assist_mode))
+            session_id = UUID(json.loads(websocket.receive_text())["session_id"])
+            websocket.send_bytes(_frame(session_id, 0))
+            assert json.loads(websocket.receive_text())["type"] == "chunk_result"
 
 
 def test_handshake_timeout_seam_maps_to_authentication_failure() -> None:
