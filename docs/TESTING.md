@@ -561,3 +561,40 @@ For a local macOS validation, start the desktop app, start the backend, and conn
 Do not record or print raw audio, transcripts, tokens, or native error details during this check.
 
 ---
+
+# Opt-in Native Live-Transcription Smoke Test
+
+The full native capture path is a **manual macOS smoke test**. It is never run
+by normal CI: its Rust preflight is marked `#[ignore]` and the launcher refuses
+to run unless `AI_MEETING_COPILOT_RUN_LOCAL_NATIVE_AUDIO_TESTS=1` is set.
+
+Prerequisites:
+
+* macOS 15 or later;
+* Screen Recording/System Audio permission for the desktop app;
+* Microphone permission when microphone capture is enabled;
+* a locally available Faster-Whisper model and a launchable Python sidecar;
+* an active Meeting and active live-transcription session, created through the
+  existing internal or test workflow.
+
+Start the opt-in flow with:
+
+```bash
+AI_MEETING_COPILOT_RUN_LOCAL_NATIVE_AUDIO_TESTS=1 \
+npm run native-audio:smoke
+```
+
+In the app, start the backend, connect live transcription, request permissions,
+select a display and optional microphone, then start capture. Capture for 8–12
+seconds, stop capture, and end the live-transcription session. Verify through
+the existing persistence test boundary that at least one finalized, non-blank
+transcript entry was saved with ordered UTC timestamps.
+
+Expected visible behavior is `capturing` followed by `stopped`; no transcript,
+audio bytes, token, session identifier, or native error detail is displayed.
+Closing the Tauri app stops capture before the WebSocket and sidecar are shut
+down. If a run is interrupted, close the desktop app; do not retain or write
+raw audio/WAV data. The deterministic Rust tests cover the non-permission
+queue, encoding, submission, and cleanup boundaries separately.
+
+---

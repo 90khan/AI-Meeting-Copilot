@@ -10,7 +10,8 @@
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "native-audio:smoke": "zsh scripts/run-local-native-audio-smoke.sh"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",
