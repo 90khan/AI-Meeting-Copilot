@@ -342,7 +342,7 @@ impl LiveTranscriptionClient {
             return Err(LiveTranscriptionClientError::ConnectionFailed);
         }
         match receive_until_chunk_result(socket, metadata.sequence).await {
-            Ok((skipped_silence, accepted_segment_count)) => {
+            Ok(response) => {
                 let session = state
                     .session
                     .as_mut()
@@ -352,8 +352,8 @@ impl LiveTranscriptionClient {
                 session.in_flight = false;
                 Ok(ChunkSubmissionResult {
                     sequence: metadata.sequence,
-                    skipped_silence,
-                    accepted_segment_count,
+                    skipped_silence: response.skipped_silence,
+                    accepted_segment_count: response.accepted_segments.len(),
                     gap_reported: false,
                 })
             }
@@ -495,16 +495,13 @@ async fn receive_until_chunk_terminal(
 async fn receive_until_chunk_result(
     socket: &mut LocalSocket,
     sequence: u64,
-) -> Result<(bool, usize), LiveTranscriptionClientError> {
+) -> Result<super::protocol::ChunkResponse, LiveTranscriptionClientError> {
     loop {
         match receive_server_message(socket).await? {
             ServerMessage::ChunkResult {
                 chunk_sequence,
-                skipped_silence,
-                accepted_segment_count,
-            } if chunk_sequence == sequence => {
-                return Ok((skipped_silence, accepted_segment_count))
-            }
+                response,
+            } if chunk_sequence == sequence => return Ok(response),
             ServerMessage::Status => continue,
             ServerMessage::Error(error) if error.fatal => {
                 return Err(LiveTranscriptionClientError::ConnectionFailed)

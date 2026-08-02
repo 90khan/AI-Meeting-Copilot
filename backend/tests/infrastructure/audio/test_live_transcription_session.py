@@ -2,6 +2,7 @@
 
 import asyncio
 from datetime import UTC, datetime
+from uuid import uuid4
 
 import pytest
 from app.application.dto import (
@@ -67,6 +68,7 @@ def _chunk(
 
 def _segment(text: str) -> ProcessedTranscriptSegment:
     return ProcessedTranscriptSegment(
+        transcript_id=uuid4(),
         text=text,
         timestamp=datetime.now(UTC),
         source=AudioSource.MIXED,

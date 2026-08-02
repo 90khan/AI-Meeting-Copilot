@@ -445,6 +445,7 @@ async def _send_chunk_result(
                 "chunk_sequence": result.chunk_sequence,
                 "accepted_segments": [
                     {
+                        "transcript_id": str(segment.transcript_id),
                         "text": segment.text,
                         "timestamp": _serialize_timestamp(segment.timestamp),
                         "source": segment.source.value,

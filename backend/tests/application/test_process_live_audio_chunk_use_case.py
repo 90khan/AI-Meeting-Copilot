@@ -58,6 +58,7 @@ class FakeAddTranscriptUseCase:
 
         self._error = error
         self.commands: list[AddTranscriptCommand] = []
+        self.results: list[AddTranscriptResult] = []
 
     async def execute(self, command: AddTranscriptCommand) -> AddTranscriptResult:
         """Record one command or propagate the configured persistence error."""
@@ -65,7 +66,9 @@ class FakeAddTranscriptUseCase:
         self.commands.append(command)
         if self._error is not None:
             raise self._error
-        return AddTranscriptResult(transcript_id=uuid4())
+        result = AddTranscriptResult(transcript_id=uuid4())
+        self.results.append(result)
+        return result
 
 
 def _chunk(*, sequence: int = 3) -> CapturedAudioChunk:
@@ -157,6 +160,10 @@ def test_execute_forwards_speech_request_and_persists_segments_in_order() -> Non
         datetime(2026, 8, 2, 10, 0, 0, 500_000, tzinfo=UTC),
         datetime(2026, 8, 2, 10, 0, 1, 500_000, tzinfo=UTC),
     ]
+    assert [segment.transcript_id for segment in result.accepted_segments] == [
+        persisted.transcript_id for persisted in add_transcript_use_case.results
+    ]
+    assert len({segment.transcript_id for segment in result.accepted_segments}) == 2
     assert result.skipped_silence is False
 
 
@@ -275,6 +282,7 @@ def test_execute_propagates_persistence_errors_unchanged() -> None:
 
     assert raised.value is error
     assert len(add_transcript_use_case.commands) == 1
+    assert add_transcript_use_case.results == []
 
 
 def test_command_rejects_blank_previous_accepted_text() -> None:

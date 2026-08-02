@@ -42,6 +42,7 @@ _PATH = "/api/v1/live-transcription"
 _MEETING_ID = MeetingId(UUID("11111111-1111-1111-1111-111111111111"))
 _CLIENT_ID = UUID("22222222-2222-2222-2222-222222222222")
 _REQUEST_ID = UUID("33333333-3333-3333-3333-333333333333")
+_TRANSCRIPT_ID = UUID("44444444-4444-4444-4444-444444444444")
 
 
 class FakeValidator:
@@ -206,6 +207,7 @@ def _result(
         chunk_sequence=sequence,
         accepted_segments=(
             ProcessedTranscriptSegment(
+                transcript_id=_TRANSCRIPT_ID,
                 text="Accepted transcript",
                 timestamp=datetime.now(UTC),
                 source=AudioSource.MIXED,
@@ -255,6 +257,9 @@ def test_successful_hello_start_chunk_and_end_flow() -> None:
             result = json.loads(websocket.receive_text())
             assert result["type"] == "chunk_result"
             assert result["chunk_sequence"] == 0
+            assert result["accepted_segments"][0]["transcript_id"] == str(
+                _TRANSCRIPT_ID
+            )
 
             websocket.send_text(_end(session_id, 0))
             assert json.loads(websocket.receive_text())["type"] == "session_stopped"

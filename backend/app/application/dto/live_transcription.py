@@ -4,6 +4,7 @@ import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
+from uuid import UUID
 
 from app.application.dto.ai.speech import AudioFormat, AudioInput
 from app.application.exceptions import ApplicationValidationError
@@ -86,6 +87,7 @@ class LiveTranscriptionStatus:
 class ProcessedTranscriptSegment:
     """One accepted transcript segment with a stable UTC timestamp."""
 
+    transcript_id: UUID
     text: str
     timestamp: datetime
     source: AudioSource
@@ -94,6 +96,8 @@ class ProcessedTranscriptSegment:
     def __post_init__(self) -> None:
         """Validate transcript content and timestamp metadata."""
 
+        if not isinstance(self.transcript_id, UUID):
+            raise ApplicationValidationError("Transcript ID must be a UUID.")
         if not self.text.strip():
             raise ApplicationValidationError(
                 "Transcript segment text must not be blank."

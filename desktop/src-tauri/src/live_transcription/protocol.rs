@@ -124,12 +124,25 @@ pub(crate) enum ServerMessage {
     SessionStarted(SessionStarted),
     ChunkResult {
         chunk_sequence: u64,
-        skipped_silence: bool,
-        accepted_segment_count: usize,
+        response: ChunkResponse,
     },
     Status,
     Error(ProtocolFailure),
     SessionStopped(SessionStopped),
+}
+
+/// Internal finalized transcript data retained for the future desktop event router.
+pub(crate) struct ChunkResultSegment {
+    pub(crate) transcript_id: Uuid,
+    pub(crate) text: String,
+    pub(crate) timestamp: String,
+    pub(crate) source: AudioSource,
+    pub(crate) speaker: String,
+}
+
+pub(crate) struct ChunkResponse {
+    pub(crate) skipped_silence: bool,
+    pub(crate) accepted_segments: Vec<ChunkResultSegment>,
 }
 
 pub(crate) struct HelloAck {
@@ -242,27 +255,42 @@ fn parse_chunk_result(
         .get("accepted_segments")
         .and_then(Value::as_array)
         .ok_or(ProtocolError::InvalidMessage)?;
+    let mut accepted_segments = Vec::with_capacity(segments.len());
     for segment in segments {
         let segment = segment.as_object().ok_or(ProtocolError::InvalidMessage)?;
-        require_fields(segment, &["text", "timestamp", "source", "speaker"])?;
-        if required_string(segment, "text")?.trim().is_empty()
-            || required_string(segment, "timestamp")?.trim().is_empty()
-            || required_string(segment, "speaker")?.trim().is_empty()
-            || !matches!(
-                required_string(segment, "source")?,
-                "mixed" | "microphone" | "system_audio"
-            )
-        {
+        require_fields(
+            segment,
+            &["transcript_id", "text", "timestamp", "source", "speaker"],
+        )?;
+        let source = match required_string(segment, "source")? {
+            "mixed" => AudioSource::Mixed,
+            "microphone" => AudioSource::Microphone,
+            "system_audio" => AudioSource::SystemAudio,
+            _ => return Err(ProtocolError::InvalidMessage),
+        };
+        let text = required_string(segment, "text")?;
+        let timestamp = required_string(segment, "timestamp")?;
+        let speaker = required_string(segment, "speaker")?;
+        if text.trim().is_empty() || timestamp.trim().is_empty() || speaker.trim().is_empty() {
             return Err(ProtocolError::InvalidMessage);
         }
+        accepted_segments.push(ChunkResultSegment {
+            transcript_id: parse_uuid(segment, "transcript_id")?,
+            text: text.to_owned(),
+            timestamp: timestamp.to_owned(),
+            source,
+            speaker: speaker.to_owned(),
+        });
     }
     Ok(ServerMessage::ChunkResult {
         chunk_sequence: required_u64(object, "chunk_sequence")?,
-        skipped_silence: object
-            .get("skipped_silence")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        accepted_segment_count: segments.len(),
+        response: ChunkResponse {
+            skipped_silence: object
+                .get("skipped_silence")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            accepted_segments,
+        },
     })
 }
 
@@ -478,5 +506,59 @@ mod tests {
             Err(ProtocolError::InvalidMessage)
         ));
         assert_eq!(AudioSource::SystemAudio.as_str(), "system_audio");
+    }
+
+    #[test]
+    fn parses_chunk_result_segments_with_stable_transcript_ids_in_order() {
+        let first_id = "00000000-0000-0000-0000-000000000010";
+        let second_id = "00000000-0000-0000-0000-000000000011";
+        let payload = format!(
+            r#"{{"type":"chunk_result","version":1,"chunk_sequence":4,"accepted_segments":[{{"transcript_id":"{first_id}","text":"First transcript","timestamp":"2026-08-02T10:00:00Z","source":"mixed","speaker":"Unknown"}},{{"transcript_id":"{second_id}","text":"Second transcript","timestamp":"2026-08-02T10:00:01Z","source":"microphone","speaker":"Mira"}}],"skipped_silence":false}}"#
+        );
+
+        let ServerMessage::ChunkResult {
+            chunk_sequence,
+            response,
+        } = parse_server_message(&payload).expect("chunk result parses")
+        else {
+            panic!("expected chunk result");
+        };
+        assert_eq!(chunk_sequence, 4);
+        assert!(!response.skipped_silence);
+        assert_eq!(response.accepted_segments.len(), 2);
+        assert_eq!(
+            response.accepted_segments[0].transcript_id.to_string(),
+            first_id
+        );
+        assert_eq!(
+            response.accepted_segments[1].transcript_id.to_string(),
+            second_id
+        );
+        assert_eq!(response.accepted_segments[0].text, "First transcript");
+        assert_eq!(
+            response.accepted_segments[1].timestamp,
+            "2026-08-02T10:00:01Z"
+        );
+        assert_eq!(
+            response.accepted_segments[1].source,
+            AudioSource::Microphone
+        );
+        assert_eq!(response.accepted_segments[1].speaker, "Mira");
+    }
+
+    #[test]
+    fn rejects_missing_or_malformed_chunk_result_transcript_ids_without_leaking_text() {
+        let missing = r#"{"type":"chunk_result","version":1,"chunk_sequence":0,"accepted_segments":[{"text":"private transcript","timestamp":"2026-08-02T10:00:00Z","source":"mixed","speaker":"Unknown"}],"skipped_silence":false}"#;
+        let malformed = r#"{"type":"chunk_result","version":1,"chunk_sequence":0,"accepted_segments":[{"transcript_id":"not-a-uuid","text":"private transcript","timestamp":"2026-08-02T10:00:00Z","source":"mixed","speaker":"Unknown"}],"skipped_silence":false}"#;
+
+        for payload in [missing, malformed] {
+            assert!(matches!(
+                parse_server_message(payload),
+                Err(ProtocolError::InvalidMessage)
+            ));
+            assert!(!ProtocolError::InvalidMessage
+                .to_string()
+                .contains("private transcript"));
+        }
     }
 }

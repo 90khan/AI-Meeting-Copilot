@@ -63,19 +63,20 @@ class ProcessLiveAudioChunkUseCase:
                 seconds=transcription_segment.start_seconds
             )
             speaker = transcription_segment.speaker or "Unknown"
+            persisted_transcript = await self._add_transcript_use_case.execute(
+                AddTranscriptCommand(
+                    meeting_id=command.chunk.meeting_id,
+                    speaker=speaker,
+                    text=accepted_text,
+                    timestamp=timestamp,
+                )
+            )
             processed_segment = ProcessedTranscriptSegment(
+                transcript_id=persisted_transcript.transcript_id,
                 text=accepted_text,
                 timestamp=timestamp,
                 source=command.chunk.source,
                 speaker=speaker,
-            )
-            await self._add_transcript_use_case.execute(
-                AddTranscriptCommand(
-                    meeting_id=command.chunk.meeting_id,
-                    speaker=processed_segment.speaker,
-                    text=processed_segment.text,
-                    timestamp=processed_segment.timestamp,
-                )
             )
             accepted_segments.append(processed_segment)
             previous_text = accepted_text

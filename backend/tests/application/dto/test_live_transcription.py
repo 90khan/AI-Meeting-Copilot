@@ -3,6 +3,7 @@
 from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime, timedelta, timezone
 from math import inf, nan
+from uuid import uuid4
 
 import pytest
 from app.application.dto import (
@@ -148,10 +149,23 @@ def test_processed_transcript_segment_validates_content(
 
     with pytest.raises(ApplicationValidationError):
         ProcessedTranscriptSegment(
+            transcript_id=uuid4(),
             text=text,
             timestamp=timestamp,
             source=AudioSource.MIXED,
             speaker=speaker,
+        )
+
+
+def test_processed_transcript_segment_requires_a_uuid_identity() -> None:
+    """Transcript identities must be explicit UUID instances."""
+
+    with pytest.raises(ApplicationValidationError, match="Transcript ID"):
+        ProcessedTranscriptSegment(  # type: ignore[arg-type]
+            transcript_id="not-a-uuid",
+            text="Text",
+            timestamp=datetime.now(UTC),
+            source=AudioSource.MIXED,
         )
 
 
