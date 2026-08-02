@@ -21,7 +21,8 @@ use tokio_tungstenite::{
 };
 use uuid::Uuid;
 
-use crate::sidecar::manager::SidecarManager;
+use crate::assist_mode::events::AssistEventSink;
+use crate::{assist_mode::events::TranscriptSegmentEvent, sidecar::manager::SidecarManager};
 
 use super::{
     binary_frames::{build_audio_chunk_frame, AudioChunkFrameMetadata, BinaryFrameError},
@@ -114,6 +115,7 @@ impl Default for ClientState {
 pub struct LiveTranscriptionClient {
     sidecar_manager: SidecarManager,
     state: Arc<Mutex<ClientState>>,
+    event_sink: Arc<Mutex<Option<Arc<dyn AssistEventSink>>>>,
 }
 
 impl LiveTranscriptionClient {
@@ -121,7 +123,16 @@ impl LiveTranscriptionClient {
         Self {
             sidecar_manager,
             state: Arc::new(Mutex::new(ClientState::default())),
+            event_sink: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Install the application-local event sink after Tauri has an app handle.
+    pub fn set_event_sink(&self, event_sink: Arc<dyn AssistEventSink>) {
+        let event_sink_state = Arc::clone(&self.event_sink);
+        tauri::async_runtime::block_on(async move {
+            *event_sink_state.lock().await = Some(event_sink);
+        });
     }
 
     /// Connect and authenticate without exposing the manager-owned token.
@@ -163,7 +174,12 @@ impl LiveTranscriptionClient {
             return Err(self.close_then_fail(socket).await);
         }
 
-        let ack = match timeout(HANDSHAKE_TIMEOUT, receive_server_message(&mut socket)).await {
+        let ack = match timeout(
+            HANDSHAKE_TIMEOUT,
+            receive_server_message(&mut socket, &self.event_sink),
+        )
+        .await
+        {
             Ok(Ok(ServerMessage::HelloAck(ack))) => ack,
             _ => return Err(self.close_then_fail(socket).await),
         };
@@ -222,7 +238,7 @@ impl LiveTranscriptionClient {
             mark_failed_state(&mut state);
             return Err(LiveTranscriptionClientError::ConnectionFailed);
         }
-        match receive_until_session_started(socket, request_id).await {
+        match receive_until_session_started(socket, request_id, &self.event_sink).await {
             Ok(started) => {
                 state.status = LiveTranscriptionLifecycleStatus::SessionActive;
                 state.session = Some(ActiveSession {
@@ -270,7 +286,7 @@ impl LiveTranscriptionClient {
             mark_failed_state(&mut state);
             return Err(LiveTranscriptionClientError::ConnectionFailed);
         }
-        match receive_until_chunk_terminal(socket, metadata.sequence).await {
+        match receive_until_chunk_terminal(socket, metadata.sequence, &self.event_sink).await {
             Ok(()) => {
                 if let Some(session) = state.session.as_mut() {
                     session.expected_sequence += 1;
@@ -341,7 +357,7 @@ impl LiveTranscriptionClient {
             mark_failed_state(&mut state);
             return Err(LiveTranscriptionClientError::ConnectionFailed);
         }
-        match receive_until_chunk_result(socket, metadata.sequence).await {
+        match receive_until_chunk_result(socket, metadata.sequence, &self.event_sink).await {
             Ok(response) => {
                 let session = state
                     .session
@@ -392,7 +408,8 @@ impl LiveTranscriptionClient {
             mark_failed_state(&mut state);
             return Err(LiveTranscriptionClientError::ConnectionFailed);
         }
-        match receive_until_session_stopped(socket, request_id, session_id).await {
+        match receive_until_session_stopped(socket, request_id, session_id, &self.event_sink).await
+        {
             Ok(()) => {
                 state.session = None;
                 state.status = LiveTranscriptionLifecycleStatus::Connected;
@@ -443,6 +460,7 @@ pub async fn get_live_transcription_status(
 
 async fn receive_server_message(
     socket: &mut LocalSocket,
+    _event_sink: &Arc<Mutex<Option<Arc<dyn AssistEventSink>>>>,
 ) -> Result<ServerMessage, LiveTranscriptionClientError> {
     match socket.next().await {
         Some(Ok(Message::Text(text))) => {
@@ -457,13 +475,18 @@ async fn receive_server_message(
 async fn receive_until_session_started(
     socket: &mut LocalSocket,
     request_id: Uuid,
+    event_sink: &Arc<Mutex<Option<Arc<dyn AssistEventSink>>>>,
 ) -> Result<super::protocol::SessionStarted, LiveTranscriptionClientError> {
     loop {
-        match receive_server_message(socket).await? {
+        match receive_server_message(socket, event_sink).await? {
             ServerMessage::SessionStarted(started) if started.request_id == request_id => {
                 return Ok(started)
             }
             ServerMessage::Status => continue,
+            message @ (ServerMessage::AssistSegmentUpdate(_)
+            | ServerMessage::AssistReplySuggestions(_)) => {
+                emit_assist_event(event_sink, message).await;
+            }
             ServerMessage::Error(error) if error.fatal => {
                 return Err(LiveTranscriptionClientError::ConnectionFailed)
             }
@@ -476,13 +499,22 @@ async fn receive_until_session_started(
 async fn receive_until_chunk_terminal(
     socket: &mut LocalSocket,
     sequence: u64,
+    event_sink: &Arc<Mutex<Option<Arc<dyn AssistEventSink>>>>,
 ) -> Result<(), LiveTranscriptionClientError> {
     loop {
-        match receive_server_message(socket).await? {
-            ServerMessage::ChunkResult { chunk_sequence, .. } if chunk_sequence == sequence => {
-                return Ok(())
+        match receive_server_message(socket, event_sink).await? {
+            ServerMessage::ChunkResult {
+                chunk_sequence,
+                response,
+            } if chunk_sequence == sequence => {
+                emit_transcript_events(event_sink, &response).await;
+                return Ok(());
             }
             ServerMessage::Status => continue,
+            message @ (ServerMessage::AssistSegmentUpdate(_)
+            | ServerMessage::AssistReplySuggestions(_)) => {
+                emit_assist_event(event_sink, message).await;
+            }
             ServerMessage::Error(error) if error.fatal => {
                 return Err(LiveTranscriptionClientError::ConnectionFailed)
             }
@@ -495,14 +527,22 @@ async fn receive_until_chunk_terminal(
 async fn receive_until_chunk_result(
     socket: &mut LocalSocket,
     sequence: u64,
+    event_sink: &Arc<Mutex<Option<Arc<dyn AssistEventSink>>>>,
 ) -> Result<super::protocol::ChunkResponse, LiveTranscriptionClientError> {
     loop {
-        match receive_server_message(socket).await? {
+        match receive_server_message(socket, event_sink).await? {
             ServerMessage::ChunkResult {
                 chunk_sequence,
                 response,
-            } if chunk_sequence == sequence => return Ok(response),
+            } if chunk_sequence == sequence => {
+                emit_transcript_events(event_sink, &response).await;
+                return Ok(response);
+            }
             ServerMessage::Status => continue,
+            message @ (ServerMessage::AssistSegmentUpdate(_)
+            | ServerMessage::AssistReplySuggestions(_)) => {
+                emit_assist_event(event_sink, message).await;
+            }
             ServerMessage::Error(error) if error.fatal => {
                 return Err(LiveTranscriptionClientError::ConnectionFailed)
             }
@@ -533,21 +573,60 @@ async fn receive_until_session_stopped(
     socket: &mut LocalSocket,
     request_id: Uuid,
     session_id: Uuid,
+    event_sink: &Arc<Mutex<Option<Arc<dyn AssistEventSink>>>>,
 ) -> Result<(), LiveTranscriptionClientError> {
     loop {
-        match receive_server_message(socket).await? {
+        match receive_server_message(socket, event_sink).await? {
             ServerMessage::SessionStopped(stopped)
                 if stopped.request_id == request_id && stopped.session_id == session_id =>
             {
                 return Ok(())
             }
             ServerMessage::Status => continue,
+            message @ (ServerMessage::AssistSegmentUpdate(_)
+            | ServerMessage::AssistReplySuggestions(_)) => {
+                emit_assist_event(event_sink, message).await;
+            }
             ServerMessage::Error(error) if error.fatal => {
                 return Err(LiveTranscriptionClientError::ConnectionFailed)
             }
             ServerMessage::Error(_) => return Err(LiveTranscriptionClientError::ProtocolFailed),
             _ => return Err(LiveTranscriptionClientError::ProtocolFailed),
         }
+    }
+}
+
+async fn emit_assist_event(
+    event_sink: &Arc<Mutex<Option<Arc<dyn AssistEventSink>>>>,
+    message: ServerMessage,
+) {
+    let sink = event_sink.lock().await.clone();
+    let Some(sink) = sink else {
+        return;
+    };
+    match message {
+        ServerMessage::AssistSegmentUpdate(event) => sink.emit_segment_update(event),
+        ServerMessage::AssistReplySuggestions(event) => sink.emit_reply_suggestions(event),
+        _ => {}
+    }
+}
+
+async fn emit_transcript_events(
+    event_sink: &Arc<Mutex<Option<Arc<dyn AssistEventSink>>>>,
+    response: &super::protocol::ChunkResponse,
+) {
+    let sink = event_sink.lock().await.clone();
+    let Some(sink) = sink else {
+        return;
+    };
+    for segment in &response.accepted_segments {
+        sink.emit_transcript_segment(TranscriptSegmentEvent {
+            transcript_id: segment.transcript_id,
+            text: segment.text.clone(),
+            timestamp: segment.timestamp.clone(),
+            source: segment.source.as_str().to_owned(),
+            speaker: segment.speaker.clone(),
+        });
     }
 }
 

@@ -1,3 +1,4 @@
+mod assist_mode;
 mod audio_capture;
 mod live_transcription;
 mod sidecar;
@@ -22,7 +23,7 @@ pub fn run() {
         ManagedAudioCaptureCoordinator::new().expect("audio capture bridge is unavailable");
     let app = tauri::Builder::default()
         .manage(sidecar_manager)
-        .manage(live_transcription_client)
+        .manage(live_transcription_client.clone())
         .manage(audio_capture_coordinator)
         .invoke_handler(tauri::generate_handler![
             start_backend,
@@ -41,6 +42,10 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while running the Tauri application");
+
+    live_transcription_client.set_event_sink(std::sync::Arc::new(
+        assist_mode::events::TauriAssistEventSink::new(app.handle().clone()),
+    ));
 
     app.run(|app_handle, event| {
         if matches!(event, tauri::RunEvent::ExitRequested { .. }) {

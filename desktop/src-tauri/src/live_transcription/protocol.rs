@@ -7,6 +7,11 @@ use serde_json::Value;
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::assist_mode::events::{
+    AssistReplySuggestionsEvent, AssistSegmentCapability, AssistSegmentUpdateEvent,
+    AssistUpdateState, ReplySuggestionEvent,
+};
+
 pub const PROTOCOL_VERSION: u8 = 1;
 pub const AUDIO_FRAME_MAGIC: &[u8; 4] = b"AMCP";
 pub const AUDIO_MESSAGE_KIND: u8 = 1;
@@ -126,12 +131,15 @@ pub(crate) enum ServerMessage {
         chunk_sequence: u64,
         response: ChunkResponse,
     },
+    AssistSegmentUpdate(AssistSegmentUpdateEvent),
+    AssistReplySuggestions(AssistReplySuggestionsEvent),
     Status,
     Error(ProtocolFailure),
     SessionStopped(SessionStopped),
 }
 
 /// Internal finalized transcript data retained for the future desktop event router.
+#[derive(Clone)]
 pub(crate) struct ChunkResultSegment {
     pub(crate) transcript_id: Uuid,
     pub(crate) text: String,
@@ -140,6 +148,7 @@ pub(crate) struct ChunkResultSegment {
     pub(crate) speaker: String,
 }
 
+#[derive(Clone)]
 pub(crate) struct ChunkResponse {
     pub(crate) skipped_silence: bool,
     pub(crate) accepted_segments: Vec<ChunkResultSegment>,
@@ -176,11 +185,141 @@ pub(crate) fn parse_server_message(input: &str) -> Result<ServerMessage, Protoco
         "hello_ack" => parse_hello_ack(object),
         "session_started" => parse_session_started(object),
         "chunk_result" => parse_chunk_result(object),
+        "assist_segment_update" => parse_assist_segment_update(object),
+        "assist_reply_suggestions" => parse_assist_reply_suggestions(object),
         "status" => parse_status(object),
         "error" => parse_error(object),
         "session_stopped" => parse_session_stopped(object),
         _ => Err(ProtocolError::InvalidMessage),
     }
+}
+
+fn parse_assist_segment_update(
+    object: &serde_json::Map<String, Value>,
+) -> Result<ServerMessage, ProtocolError> {
+    validate_version(object)?;
+    let capability = match required_string(object, "capability")? {
+        "translation" => AssistSegmentCapability::Translation,
+        "simplification" => AssistSegmentCapability::Simplification,
+        _ => return Err(ProtocolError::InvalidMessage),
+    };
+    let state = parse_assist_state(required_string(object, "state")?)?;
+    let common = ["type", "version", "transcript_id", "capability", "state"];
+    let mut expected: Vec<&str> = match (capability, state) {
+        (AssistSegmentCapability::Translation, AssistUpdateState::Ready) => {
+            [common.as_slice(), &["translated_text"]].concat()
+        }
+        (AssistSegmentCapability::Simplification, AssistUpdateState::Ready) => {
+            [common.as_slice(), &["simplified_text", "target_level"]].concat()
+        }
+        _ => common.to_vec(),
+    };
+    let message = if state != AssistUpdateState::Ready && object.contains_key("message") {
+        expected.push("message");
+        Some(non_blank_string(object, "message")?.to_owned())
+    } else {
+        None
+    };
+    require_fields(object, &expected)?;
+
+    let translated_text = if capability == AssistSegmentCapability::Translation
+        && state == AssistUpdateState::Ready
+    {
+        Some(non_blank_string(object, "translated_text")?.to_owned())
+    } else {
+        None
+    };
+    let (simplified_text, target_level) = if capability == AssistSegmentCapability::Simplification
+        && state == AssistUpdateState::Ready
+    {
+        let level = non_blank_string(object, "target_level")?;
+        if !matches!(level, "b1" | "b2") {
+            return Err(ProtocolError::InvalidMessage);
+        }
+        (
+            Some(non_blank_string(object, "simplified_text")?.to_owned()),
+            Some(level.to_owned()),
+        )
+    } else {
+        (None, None)
+    };
+    Ok(ServerMessage::AssistSegmentUpdate(
+        AssistSegmentUpdateEvent {
+            transcript_id: parse_uuid(object, "transcript_id")?,
+            capability,
+            state,
+            translated_text,
+            simplified_text,
+            target_level,
+            message,
+        },
+    ))
+}
+
+fn parse_assist_reply_suggestions(
+    object: &serde_json::Map<String, Value>,
+) -> Result<ServerMessage, ProtocolError> {
+    validate_version(object)?;
+    let state = parse_assist_state(required_string(object, "state")?)?;
+    let common = ["type", "version", "anchor_transcript_id", "state"];
+    let mut expected: Vec<&str> = if state == AssistUpdateState::Ready {
+        [common.as_slice(), &["suggestions"]].concat()
+    } else {
+        common.to_vec()
+    };
+    let message = if state != AssistUpdateState::Ready && object.contains_key("message") {
+        expected.push("message");
+        Some(non_blank_string(object, "message")?.to_owned())
+    } else {
+        None
+    };
+    require_fields(object, &expected)?;
+    let suggestions = if state == AssistUpdateState::Ready {
+        let values = object
+            .get("suggestions")
+            .and_then(Value::as_array)
+            .ok_or(ProtocolError::InvalidMessage)?;
+        if !(1..=2).contains(&values.len()) {
+            return Err(ProtocolError::InvalidMessage);
+        }
+        values
+            .iter()
+            .map(parse_reply_suggestion)
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        Vec::new()
+    };
+    Ok(ServerMessage::AssistReplySuggestions(
+        AssistReplySuggestionsEvent {
+            anchor_transcript_id: parse_uuid(object, "anchor_transcript_id")?,
+            state,
+            suggestions,
+            message,
+        },
+    ))
+}
+
+fn parse_assist_state(value: &str) -> Result<AssistUpdateState, ProtocolError> {
+    match value {
+        "processing" => Ok(AssistUpdateState::Processing),
+        "ready" => Ok(AssistUpdateState::Ready),
+        "failed" => Ok(AssistUpdateState::Failed),
+        "unavailable" => Ok(AssistUpdateState::Unavailable),
+        _ => Err(ProtocolError::InvalidMessage),
+    }
+}
+
+fn parse_reply_suggestion(value: &Value) -> Result<ReplySuggestionEvent, ProtocolError> {
+    let object = value.as_object().ok_or(ProtocolError::InvalidMessage)?;
+    require_fields(object, &["text", "tone"])?;
+    let tone = non_blank_string(object, "tone")?;
+    if !matches!(tone, "neutral" | "professional" | "friendly" | "confident") {
+        return Err(ProtocolError::InvalidMessage);
+    }
+    Ok(ReplySuggestionEvent {
+        text: non_blank_string(object, "text")?.to_owned(),
+        tone: tone.to_owned(),
+    })
 }
 
 fn parse_hello_ack(
@@ -391,6 +530,17 @@ fn required_string<'a>(
         .ok_or(ProtocolError::InvalidMessage)
 }
 
+fn non_blank_string<'a>(
+    object: &'a serde_json::Map<String, Value>,
+    field: &str,
+) -> Result<&'a str, ProtocolError> {
+    let value = required_string(object, field)?;
+    if value.trim().is_empty() {
+        return Err(ProtocolError::InvalidMessage);
+    }
+    Ok(value)
+}
+
 fn optional_string<'a>(
     object: &'a serde_json::Map<String, Value>,
     field: &str,
@@ -560,5 +710,40 @@ mod tests {
                 .to_string()
                 .contains("private transcript"));
         }
+    }
+
+    #[test]
+    fn parses_strict_assist_updates_without_provider_metadata() {
+        let translation = r#"{"type":"assist_segment_update","version":1,"transcript_id":"00000000-0000-0000-0000-000000000010","capability":"translation","state":"ready","translated_text":"translated"}"#;
+        let simplification = r#"{"type":"assist_segment_update","version":1,"transcript_id":"00000000-0000-0000-0000-000000000010","capability":"simplification","state":"ready","simplified_text":"simple","target_level":"b1"}"#;
+        let reply = r#"{"type":"assist_reply_suggestions","version":1,"anchor_transcript_id":"00000000-0000-0000-0000-000000000010","state":"ready","suggestions":[{"text":"reply","tone":"professional"}]}"#;
+
+        assert!(matches!(
+            parse_server_message(translation),
+            Ok(ServerMessage::AssistSegmentUpdate(_))
+        ));
+        assert!(matches!(
+            parse_server_message(simplification),
+            Ok(ServerMessage::AssistSegmentUpdate(_))
+        ));
+        assert!(matches!(
+            parse_server_message(reply),
+            Ok(ServerMessage::AssistReplySuggestions(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_contradictory_or_invalid_assist_messages() {
+        let contradictory = r#"{"type":"assist_segment_update","version":1,"transcript_id":"00000000-0000-0000-0000-000000000010","capability":"translation","state":"processing","translated_text":"private"}"#;
+        let invalid_state = r#"{"type":"assist_reply_suggestions","version":1,"anchor_transcript_id":"00000000-0000-0000-0000-000000000010","state":"unknown"}"#;
+
+        assert!(matches!(
+            parse_server_message(contradictory),
+            Err(ProtocolError::InvalidMessage)
+        ));
+        assert!(matches!(
+            parse_server_message(invalid_state),
+            Err(ProtocolError::InvalidMessage)
+        ));
     }
 }
