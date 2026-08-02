@@ -2,6 +2,7 @@
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
+use thiserror::Error;
 use uuid::Uuid;
 
 pub(crate) const TRANSCRIPT_SEGMENT_EVENT: &str = "assist://transcript-segment";
@@ -58,10 +59,24 @@ pub(crate) struct AssistReplySuggestionsEvent {
     pub(crate) message: Option<String>,
 }
 
+#[derive(Debug, Error)]
+#[error("Assist Mode event delivery failed.")]
+pub(crate) struct AssistEventDeliveryError;
+
+/// A narrow, fakeable boundary for typed desktop event delivery.
 pub(crate) trait AssistEventSink: Send + Sync + 'static {
-    fn emit_transcript_segment(&self, event: TranscriptSegmentEvent);
-    fn emit_segment_update(&self, event: AssistSegmentUpdateEvent);
-    fn emit_reply_suggestions(&self, event: AssistReplySuggestionsEvent);
+    fn emit_transcript_segment(
+        &self,
+        event: TranscriptSegmentEvent,
+    ) -> Result<(), AssistEventDeliveryError>;
+    fn emit_segment_update(
+        &self,
+        event: AssistSegmentUpdateEvent,
+    ) -> Result<(), AssistEventDeliveryError>;
+    fn emit_reply_suggestions(
+        &self,
+        event: AssistReplySuggestionsEvent,
+    ) -> Result<(), AssistEventDeliveryError>;
 }
 
 /// Tauri-local event sink. Emission failures intentionally expose no detail.
@@ -76,15 +91,30 @@ impl TauriAssistEventSink {
 }
 
 impl AssistEventSink for TauriAssistEventSink {
-    fn emit_transcript_segment(&self, event: TranscriptSegmentEvent) {
-        let _ = self.app_handle.emit(TRANSCRIPT_SEGMENT_EVENT, event);
+    fn emit_transcript_segment(
+        &self,
+        event: TranscriptSegmentEvent,
+    ) -> Result<(), AssistEventDeliveryError> {
+        self.app_handle
+            .emit(TRANSCRIPT_SEGMENT_EVENT, event)
+            .map_err(|_| AssistEventDeliveryError)
     }
 
-    fn emit_segment_update(&self, event: AssistSegmentUpdateEvent) {
-        let _ = self.app_handle.emit(SEGMENT_UPDATE_EVENT, event);
+    fn emit_segment_update(
+        &self,
+        event: AssistSegmentUpdateEvent,
+    ) -> Result<(), AssistEventDeliveryError> {
+        self.app_handle
+            .emit(SEGMENT_UPDATE_EVENT, event)
+            .map_err(|_| AssistEventDeliveryError)
     }
 
-    fn emit_reply_suggestions(&self, event: AssistReplySuggestionsEvent) {
-        let _ = self.app_handle.emit(REPLY_SUGGESTIONS_EVENT, event);
+    fn emit_reply_suggestions(
+        &self,
+        event: AssistReplySuggestionsEvent,
+    ) -> Result<(), AssistEventDeliveryError> {
+        self.app_handle
+            .emit(REPLY_SUGGESTIONS_EVENT, event)
+            .map_err(|_| AssistEventDeliveryError)
     }
 }

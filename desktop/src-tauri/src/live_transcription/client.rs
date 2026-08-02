@@ -700,7 +700,16 @@ async fn dispatch_message(
                 }
             };
             if let Some(responder) = responder {
-                emit_transcript_events(event_sink, &response).await;
+                // A missing sink is a deliberate no-op during non-Tauri tests. A real
+                // delivery failure is fatal: losing finalized transcript events would
+                // desynchronize the desktop from persisted backend state.
+                if emit_transcript_events(event_sink, &response).await.is_err() {
+                    let mut state = state.lock().await;
+                    let _ = responder.send(Err(LiveTranscriptionClientError::ConnectionFailed));
+                    fail_pending_operations(&mut state);
+                    mark_failed_state(&mut state);
+                    return true;
+                }
                 let _ = responder.send(Ok(response));
             }
             false
@@ -747,8 +756,16 @@ async fn dispatch_message(
             message @ (ServerMessage::AssistSegmentUpdate(_)
             | ServerMessage::AssistReplySuggestions(_)),
         ) => {
-            // Reserved for the later Assist Mode event router; never resolve an operation.
-            let _ = message;
+            if !event_routing_enabled(state).await
+                || emit_assist_event(event_sink, message).await.is_err()
+            {
+                if event_routing_enabled(state).await {
+                    let mut state = state.lock().await;
+                    fail_pending_operations(&mut state);
+                    mark_failed_state(&mut state);
+                    return true;
+                }
+            }
             false
         }
         Ok(ServerMessage::Status) => false,
@@ -787,28 +804,40 @@ fn format_utc_timestamp(seconds: i64) -> Result<String, LiveTranscriptionClientE
     ))
 }
 
+async fn event_routing_enabled(state: &Arc<Mutex<ClientState>>) -> bool {
+    matches!(
+        state.lock().await.status,
+        LiveTranscriptionLifecycleStatus::Connected
+            | LiveTranscriptionLifecycleStatus::SessionActive
+    )
+}
+
 async fn emit_assist_event(
     event_sink: &Arc<Mutex<Option<Arc<dyn AssistEventSink>>>>,
     message: ServerMessage,
-) {
+) -> Result<(), ()> {
     let sink = event_sink.lock().await.clone();
     let Some(sink) = sink else {
-        return;
+        return Ok(());
     };
     match message {
-        ServerMessage::AssistSegmentUpdate(event) => sink.emit_segment_update(event),
-        ServerMessage::AssistReplySuggestions(event) => sink.emit_reply_suggestions(event),
-        _ => {}
+        ServerMessage::AssistSegmentUpdate(event) => {
+            sink.emit_segment_update(event).map_err(|_| ())
+        }
+        ServerMessage::AssistReplySuggestions(event) => {
+            sink.emit_reply_suggestions(event).map_err(|_| ())
+        }
+        _ => Ok(()),
     }
 }
 
 async fn emit_transcript_events(
     event_sink: &Arc<Mutex<Option<Arc<dyn AssistEventSink>>>>,
     response: &super::protocol::ChunkResponse,
-) {
+) -> Result<(), ()> {
     let sink = event_sink.lock().await.clone();
     let Some(sink) = sink else {
-        return;
+        return Ok(());
     };
     for segment in &response.accepted_segments {
         sink.emit_transcript_segment(TranscriptSegmentEvent {
@@ -817,8 +846,10 @@ async fn emit_transcript_events(
             timestamp: segment.timestamp.clone(),
             source: segment.source.as_str().to_owned(),
             speaker: segment.speaker.clone(),
-        });
+        })
+        .map_err(|_| ())?;
     }
+    Ok(())
 }
 
 fn map_binary_error(error: BinaryFrameError) -> LiveTranscriptionClientError {
@@ -899,13 +930,75 @@ mod tests {
         LiveTranscriptionLifecycleStatus, LiveTranscriptionStatus, PendingChunk, PendingEnd,
         PendingStart,
     };
-    use crate::live_transcription::{
-        binary_frames::AudioChunkFrameMetadata,
-        protocol::{AudioSource, ChunkResponse, ServerMessage, SessionStarted, SessionStopped},
+    use crate::{
+        assist_mode::events::{
+            AssistEventDeliveryError, AssistEventSink, AssistReplySuggestionsEvent,
+            AssistSegmentCapability, AssistSegmentUpdateEvent, AssistUpdateState,
+            ReplySuggestionEvent, TranscriptSegmentEvent,
+        },
+        live_transcription::{
+            binary_frames::AudioChunkFrameMetadata,
+            protocol::{
+                AudioSource, ChunkResponse, ChunkResultSegment, ServerMessage, SessionStarted,
+                SessionStopped,
+            },
+        },
     };
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex as StdMutex};
     use tokio::sync::{oneshot, Mutex};
     use uuid::Uuid;
+
+    #[derive(Default)]
+    struct RecordingSink {
+        transcript_ids: StdMutex<Vec<Uuid>>,
+        segment_updates: StdMutex<Vec<Uuid>>,
+        reply_anchors: StdMutex<Vec<Uuid>>,
+        fail: bool,
+    }
+
+    impl AssistEventSink for RecordingSink {
+        fn emit_transcript_segment(
+            &self,
+            event: TranscriptSegmentEvent,
+        ) -> Result<(), AssistEventDeliveryError> {
+            if self.fail {
+                return Err(AssistEventDeliveryError);
+            }
+            self.transcript_ids
+                .lock()
+                .expect("recording lock")
+                .push(event.transcript_id);
+            Ok(())
+        }
+
+        fn emit_segment_update(
+            &self,
+            event: AssistSegmentUpdateEvent,
+        ) -> Result<(), AssistEventDeliveryError> {
+            if self.fail {
+                return Err(AssistEventDeliveryError);
+            }
+            self.segment_updates
+                .lock()
+                .expect("recording lock")
+                .push(event.transcript_id);
+            Ok(())
+        }
+
+        fn emit_reply_suggestions(
+            &self,
+            event: AssistReplySuggestionsEvent,
+        ) -> Result<(), AssistEventDeliveryError> {
+            if self.fail {
+                return Err(AssistEventDeliveryError);
+            }
+            self.reply_anchors
+                .lock()
+                .expect("recording lock")
+                .push(event.anchor_transcript_id);
+            Ok(())
+        }
+    }
 
     #[test]
     fn state_cleanup_is_idempotent_and_redacted() {
@@ -1109,5 +1202,171 @@ mod tests {
                 .expect("disconnect fails end"),
             LiveTranscriptionClientError::ConnectionFailed
         );
+    }
+
+    #[tokio::test]
+    async fn chunk_result_emits_transcripts_in_order_before_resolving() {
+        let state = Arc::new(Mutex::new(ClientState {
+            status: LiveTranscriptionLifecycleStatus::SessionActive,
+            ..ClientState::default()
+        }));
+        let sink = Arc::new(RecordingSink::default());
+        let event_sink: Arc<Mutex<Option<Arc<dyn AssistEventSink>>>> =
+            Arc::new(Mutex::new(Some(sink.clone())));
+        let (sender, receiver) = oneshot::channel();
+        state.lock().await.pending_chunk = Some(PendingChunk {
+            sequence: 3,
+            responder: sender,
+        });
+        let first_id = Uuid::new_v4();
+        let second_id = Uuid::new_v4();
+
+        assert!(
+            !dispatch_message(
+                &state,
+                &event_sink,
+                Ok(ServerMessage::ChunkResult {
+                    chunk_sequence: 3,
+                    response: ChunkResponse {
+                        skipped_silence: false,
+                        accepted_segments: vec![
+                            transcript_segment(first_id),
+                            transcript_segment(second_id),
+                        ],
+                    },
+                }),
+            )
+            .await
+        );
+
+        assert_eq!(
+            *sink.transcript_ids.lock().expect("recording lock"),
+            vec![first_id, second_id]
+        );
+        assert!(receiver
+            .await
+            .expect("chunk responder remains connected")
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn assist_events_route_while_a_chunk_is_pending() {
+        let state = Arc::new(Mutex::new(ClientState {
+            status: LiveTranscriptionLifecycleStatus::SessionActive,
+            ..ClientState::default()
+        }));
+        let sink = Arc::new(RecordingSink::default());
+        let event_sink: Arc<Mutex<Option<Arc<dyn AssistEventSink>>>> =
+            Arc::new(Mutex::new(Some(sink.clone())));
+        let (sender, _receiver) = oneshot::channel();
+        state.lock().await.pending_chunk = Some(PendingChunk {
+            sequence: 0,
+            responder: sender,
+        });
+        let transcript_id = Uuid::new_v4();
+        let anchor_id = Uuid::new_v4();
+
+        assert!(
+            !dispatch_message(
+                &state,
+                &event_sink,
+                Ok(ServerMessage::AssistSegmentUpdate(
+                    AssistSegmentUpdateEvent {
+                        transcript_id,
+                        capability: AssistSegmentCapability::Translation,
+                        state: AssistUpdateState::Ready,
+                        translated_text: Some("translated".to_owned()),
+                        simplified_text: None,
+                        target_level: None,
+                        message: None,
+                    }
+                )),
+            )
+            .await
+        );
+        assert!(
+            !dispatch_message(
+                &state,
+                &event_sink,
+                Ok(ServerMessage::AssistReplySuggestions(
+                    AssistReplySuggestionsEvent {
+                        anchor_transcript_id: anchor_id,
+                        state: AssistUpdateState::Ready,
+                        suggestions: vec![ReplySuggestionEvent {
+                            text: "reply".to_owned(),
+                            tone: "professional".to_owned(),
+                        }],
+                        message: None,
+                    },
+                )),
+            )
+            .await
+        );
+
+        assert_eq!(
+            *sink.segment_updates.lock().expect("recording lock"),
+            vec![transcript_id]
+        );
+        assert_eq!(
+            *sink.reply_anchors.lock().expect("recording lock"),
+            vec![anchor_id]
+        );
+        assert!(state.lock().await.pending_chunk.is_some());
+    }
+
+    #[tokio::test]
+    async fn event_delivery_failure_fails_the_client_without_content() {
+        let state = Arc::new(Mutex::new(ClientState {
+            status: LiveTranscriptionLifecycleStatus::SessionActive,
+            ..ClientState::default()
+        }));
+        let sink = Arc::new(RecordingSink {
+            fail: true,
+            ..RecordingSink::default()
+        });
+        let event_sink: Arc<Mutex<Option<Arc<dyn AssistEventSink>>>> =
+            Arc::new(Mutex::new(Some(sink)));
+        let (sender, receiver) = oneshot::channel();
+        state.lock().await.pending_chunk = Some(PendingChunk {
+            sequence: 0,
+            responder: sender,
+        });
+
+        assert!(
+            dispatch_message(
+                &state,
+                &event_sink,
+                Ok(ServerMessage::ChunkResult {
+                    chunk_sequence: 0,
+                    response: ChunkResponse {
+                        skipped_silence: false,
+                        accepted_segments: vec![transcript_segment(Uuid::new_v4())],
+                    },
+                }),
+            )
+            .await
+        );
+        assert_eq!(
+            state.lock().await.status,
+            LiveTranscriptionLifecycleStatus::Failed
+        );
+        assert_eq!(
+            receiver
+                .await
+                .expect("chunk responder resolves")
+                .err()
+                .expect("event failure fails chunk"),
+            LiveTranscriptionClientError::ConnectionFailed
+        );
+    }
+
+    fn transcript_segment(transcript_id: Uuid) -> ChunkResultSegment {
+        ChunkResultSegment {
+            transcript_id,
+            text: "private transcript".to_owned(),
+            timestamp: "2026-08-02T10:00:00Z".to_owned(),
+            source: AudioSource::Mixed,
+            speaker: "Unknown".to_owned(),
+        }
     }
 }
