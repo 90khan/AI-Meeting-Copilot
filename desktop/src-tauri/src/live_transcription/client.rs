@@ -13,7 +13,7 @@ use tauri::State;
 use thiserror::Error;
 use tokio::{
     net::TcpStream,
-    sync::Mutex,
+    sync::{mpsc, oneshot, Mutex},
     time::{timeout, Duration},
 };
 use tokio_tungstenite::{
@@ -36,6 +36,9 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const LIVE_TRANSCRIPTION_PATH: &str = "/api/v1/live-transcription";
 
 type LocalSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+type LocalWriter = futures_util::stream::SplitSink<LocalSocket, Message>;
+type LocalReader = futures_util::stream::SplitStream<LocalSocket>;
+type InboundMessage = Result<ServerMessage, LiveTranscriptionClientError>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -55,7 +58,7 @@ pub struct LiveTranscriptionStatus {
     pub message: Option<String>,
 }
 
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Error, PartialEq, Eq)]
 pub enum LiveTranscriptionClientError {
     #[error("The live transcription client is not connected.")]
     NotConnected,
@@ -90,8 +93,31 @@ struct ActiveSession {
     last_capture_started_at_seconds: f64,
 }
 
+struct PendingStart {
+    request_id: Uuid,
+    responder:
+        oneshot::Sender<Result<super::protocol::SessionStarted, LiveTranscriptionClientError>>,
+}
+
+struct PendingChunk {
+    sequence: u64,
+    responder:
+        oneshot::Sender<Result<super::protocol::ChunkResponse, LiveTranscriptionClientError>>,
+}
+
+struct PendingEnd {
+    request_id: Uuid,
+    session_id: Uuid,
+    responder: oneshot::Sender<Result<(), LiveTranscriptionClientError>>,
+}
+
 struct ClientState {
-    socket: Option<LocalSocket>,
+    writer: Option<Arc<Mutex<LocalWriter>>>,
+    reader_task: Option<tokio::task::JoinHandle<()>>,
+    dispatcher_task: Option<tokio::task::JoinHandle<()>>,
+    pending_start: Option<PendingStart>,
+    pending_chunk: Option<PendingChunk>,
+    pending_end: Option<PendingEnd>,
     status: LiveTranscriptionLifecycleStatus,
     message: Option<String>,
     max_binary_payload_bytes: usize,
@@ -101,7 +127,12 @@ struct ClientState {
 impl Default for ClientState {
     fn default() -> Self {
         Self {
-            socket: None,
+            writer: None,
+            reader_task: None,
+            dispatcher_task: None,
+            pending_start: None,
+            pending_chunk: None,
+            pending_end: None,
             status: LiveTranscriptionLifecycleStatus::Disconnected,
             message: None,
             max_binary_payload_bytes: 0,
@@ -116,6 +147,7 @@ pub struct LiveTranscriptionClient {
     sidecar_manager: SidecarManager,
     state: Arc<Mutex<ClientState>>,
     event_sink: Arc<Mutex<Option<Arc<dyn AssistEventSink>>>>,
+    operation_lock: Arc<Mutex<()>>,
 }
 
 impl LiveTranscriptionClient {
@@ -124,6 +156,7 @@ impl LiveTranscriptionClient {
             sidecar_manager,
             state: Arc::new(Mutex::new(ClientState::default())),
             event_sink: Arc::new(Mutex::new(None)),
+            operation_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -174,18 +207,25 @@ impl LiveTranscriptionClient {
             return Err(self.close_then_fail(socket).await);
         }
 
-        let ack = match timeout(
-            HANDSHAKE_TIMEOUT,
-            receive_server_message(&mut socket, &self.event_sink),
-        )
-        .await
-        {
+        let ack = match timeout(HANDSHAKE_TIMEOUT, receive_handshake(&mut socket)).await {
             Ok(Ok(ServerMessage::HelloAck(ack))) => ack,
             _ => return Err(self.close_then_fail(socket).await),
         };
 
+        let (writer, reader) = socket.split();
+        let writer = Arc::new(Mutex::new(writer));
+        let (inbound_sender, inbound_receiver) = mpsc::channel(16);
+        let reader_task = tokio::spawn(run_reader(reader, inbound_sender));
+        let dispatcher_task = tokio::spawn(run_dispatcher(
+            inbound_receiver,
+            Arc::clone(&self.state),
+            Arc::clone(&self.event_sink),
+        ));
+
         let mut state = self.state.lock().await;
-        state.socket = Some(socket);
+        state.writer = Some(writer);
+        state.reader_task = Some(reader_task);
+        state.dispatcher_task = Some(dispatcher_task);
         state.status = LiveTranscriptionLifecycleStatus::Connected;
         state.max_binary_payload_bytes = ack.max_binary_payload_bytes;
         state.message = None;
@@ -194,19 +234,32 @@ impl LiveTranscriptionClient {
 
     /// Close the WebSocket and discard all session state. Repeated calls are safe.
     pub async fn disconnect(&self) -> LiveTranscriptionStatus {
-        let socket = {
+        let (writer, reader_task, dispatcher_task) = {
             let mut state = self.state.lock().await;
             if state.status == LiveTranscriptionLifecycleStatus::Disconnected {
                 return public_status(&state);
             }
             state.status = LiveTranscriptionLifecycleStatus::Stopping;
-            state.socket.take()
+            (
+                state.writer.take(),
+                state.reader_task.take(),
+                state.dispatcher_task.take(),
+            )
         };
-        if let Some(mut socket) = socket {
-            let _ = socket.close(None).await;
+        if let Some(writer) = writer {
+            let _ = writer.lock().await.send(Message::Close(None)).await;
+        }
+        if let Some(task) = reader_task {
+            task.abort();
+            let _ = task.await;
+        }
+        if let Some(task) = dispatcher_task {
+            task.abort();
+            let _ = task.await;
         }
 
         let mut state = self.state.lock().await;
+        fail_pending_operations(&mut state);
         clear_disconnected(&mut state);
         public_status(&state)
     }
@@ -223,23 +276,45 @@ impl LiveTranscriptionClient {
         language_hint: Option<&str>,
         source: AudioSource,
     ) -> Result<(), LiveTranscriptionClientError> {
+        let _operation = self.operation_lock.lock().await;
         let request_id = Uuid::new_v4();
         let control = serialize_start_session(request_id, meeting_id, language_hint, source)
             .map_err(|_| LiveTranscriptionClientError::ProtocolFailed)?;
-        let mut state = self.state.lock().await;
-        if state.status != LiveTranscriptionLifecycleStatus::Connected || state.session.is_some() {
-            return Err(LiveTranscriptionClientError::AlreadyActive);
+        let (writer, receiver) = {
+            let mut state = self.state.lock().await;
+            if state.status != LiveTranscriptionLifecycleStatus::Connected
+                || state.session.is_some()
+            {
+                return Err(LiveTranscriptionClientError::AlreadyActive);
+            }
+            if state.pending_start.is_some() {
+                return Err(LiveTranscriptionClientError::AlreadyActive);
+            }
+            let writer = state
+                .writer
+                .as_ref()
+                .cloned()
+                .ok_or(LiveTranscriptionClientError::NotConnected)?;
+            let (sender, receiver) = oneshot::channel();
+            state.pending_start = Some(PendingStart {
+                request_id,
+                responder: sender,
+            });
+            (writer, receiver)
+        };
+        if writer
+            .lock()
+            .await
+            .send(Message::Text(control.into()))
+            .await
+            .is_err()
+        {
+            self.clear_pending_start(request_id).await;
+            return Err(self.mark_failed().await);
         }
-        let socket = state
-            .socket
-            .as_mut()
-            .ok_or(LiveTranscriptionClientError::NotConnected)?;
-        if socket.send(Message::Text(control.into())).await.is_err() {
-            mark_failed_state(&mut state);
-            return Err(LiveTranscriptionClientError::ConnectionFailed);
-        }
-        match receive_until_session_started(socket, request_id, &self.event_sink).await {
+        match wait_for_response(receiver).await {
             Ok(started) => {
+                let mut state = self.state.lock().await;
                 state.status = LiveTranscriptionLifecycleStatus::SessionActive;
                 state.session = Some(ActiveSession {
                     session_id: started.session_id,
@@ -255,7 +330,7 @@ impl LiveTranscriptionClient {
                 Ok(())
             }
             Err(error) => {
-                mark_failed_state(&mut state);
+                self.clear_pending_start(request_id).await;
                 Err(error)
             }
         }
@@ -267,43 +342,9 @@ impl LiveTranscriptionClient {
         metadata: AudioChunkFrameMetadata,
         wav_payload: &[u8],
     ) -> Result<(), LiveTranscriptionClientError> {
-        let mut state = self.state.lock().await;
-        validate_chunk_admission(&state, &metadata)?;
-        let max_payload = state.max_binary_payload_bytes;
-        let session = state
-            .session
-            .as_mut()
-            .ok_or(LiveTranscriptionClientError::SessionNotActive)?;
-        let frame = build_audio_chunk_frame(&metadata, wav_payload, max_payload)
-            .map_err(map_binary_error)?;
-        session.in_flight = true;
-
-        let socket = state
-            .socket
-            .as_mut()
-            .ok_or(LiveTranscriptionClientError::NotConnected)?;
-        if socket.send(Message::Binary(frame.into())).await.is_err() {
-            mark_failed_state(&mut state);
-            return Err(LiveTranscriptionClientError::ConnectionFailed);
-        }
-        match receive_until_chunk_terminal(socket, metadata.sequence, &self.event_sink).await {
-            Ok(()) => {
-                if let Some(session) = state.session.as_mut() {
-                    session.expected_sequence += 1;
-                    session.in_flight = false;
-                }
-                Ok(())
-            }
-            Err(error) => {
-                if let Some(session) = state.session.as_mut() {
-                    session.in_flight = false;
-                }
-                if error == LiveTranscriptionClientError::ConnectionFailed {
-                    mark_failed_state(&mut state);
-                }
-                Err(error)
-            }
-        }
+        self.send_chunk_and_wait(metadata.clone(), wav_payload)
+            .await?;
+        self.complete_chunk(metadata.sequence, None).await
     }
 
     /// Submit one finalized WAV chunk. Session IDs, protocol version, and the
@@ -317,14 +358,13 @@ impl LiveTranscriptionClient {
         if !capture_started_at_seconds.is_finite() || capture_started_at_seconds < 0.0 {
             return Err(LiveTranscriptionClientError::InvalidTimestamp);
         }
-        let mut state = self.state.lock().await;
+        let state = self.state.lock().await;
         if state.status != LiveTranscriptionLifecycleStatus::SessionActive {
             return Err(LiveTranscriptionClientError::SessionNotActive);
         }
-        let max_payload = state.max_binary_payload_bytes;
         let session = state
             .session
-            .as_mut()
+            .as_ref()
             .ok_or(LiveTranscriptionClientError::SessionNotActive)?;
         if session.in_flight {
             return Err(LiveTranscriptionClientError::SessionNotActive);
@@ -346,26 +386,14 @@ impl LiveTranscriptionClient {
             overlap_seconds,
             byte_length: wav_payload.len(),
         };
-        let frame = build_audio_chunk_frame(&metadata, &wav_payload, max_payload)
-            .map_err(map_binary_error)?;
-        session.in_flight = true;
-        let socket = state
-            .socket
-            .as_mut()
-            .ok_or(LiveTranscriptionClientError::NotConnected)?;
-        if socket.send(Message::Binary(frame.into())).await.is_err() {
-            mark_failed_state(&mut state);
-            return Err(LiveTranscriptionClientError::ConnectionFailed);
-        }
-        match receive_until_chunk_result(socket, metadata.sequence, &self.event_sink).await {
+        drop(state);
+        match self
+            .send_chunk_and_wait(metadata.clone(), &wav_payload)
+            .await
+        {
             Ok(response) => {
-                let session = state
-                    .session
-                    .as_mut()
-                    .ok_or(LiveTranscriptionClientError::SessionNotActive)?;
-                session.expected_sequence += 1;
-                session.last_capture_started_at_seconds = capture_started_at_seconds;
-                session.in_flight = false;
+                self.complete_chunk(metadata.sequence, Some(capture_started_at_seconds))
+                    .await?;
                 Ok(ChunkSubmissionResult {
                     sequence: metadata.sequence,
                     skipped_silence: response.skipped_silence,
@@ -373,50 +401,62 @@ impl LiveTranscriptionClient {
                     gap_reported: false,
                 })
             }
-            Err(error) => {
-                if let Some(session) = state.session.as_mut() {
-                    session.in_flight = false;
-                }
-                if error == LiveTranscriptionClientError::ConnectionFailed {
-                    mark_failed_state(&mut state);
-                }
-                Err(error)
-            }
+            Err(error) => Err(error),
         }
     }
 
     /// End the active session using the backend's empty-session last-sequence convention.
     pub(crate) async fn end_session(&self) -> Result<(), LiveTranscriptionClientError> {
+        let _operation = self.operation_lock.lock().await;
         let request_id = Uuid::new_v4();
-        let mut state = self.state.lock().await;
-        let session = state
-            .session
-            .as_ref()
-            .ok_or(LiveTranscriptionClientError::SessionNotActive)?;
-        let control = serialize_end_session(
-            request_id,
-            session.session_id,
-            session.expected_sequence.saturating_sub(1),
-        )
-        .map_err(|_| LiveTranscriptionClientError::ProtocolFailed)?;
-        let session_id = session.session_id;
-        let socket = state
-            .socket
-            .as_mut()
-            .ok_or(LiveTranscriptionClientError::NotConnected)?;
-        if socket.send(Message::Text(control.into())).await.is_err() {
-            mark_failed_state(&mut state);
-            return Err(LiveTranscriptionClientError::ConnectionFailed);
-        }
-        match receive_until_session_stopped(socket, request_id, session_id, &self.event_sink).await
+        let (writer, receiver, control, session_id) = {
+            let mut state = self.state.lock().await;
+            let session = state
+                .session
+                .as_ref()
+                .ok_or(LiveTranscriptionClientError::SessionNotActive)?;
+            if state.pending_end.is_some() {
+                return Err(LiveTranscriptionClientError::AlreadyActive);
+            }
+            let session_id = session.session_id;
+            let control = serialize_end_session(
+                request_id,
+                session_id,
+                session.expected_sequence.saturating_sub(1),
+            )
+            .map_err(|_| LiveTranscriptionClientError::ProtocolFailed)?;
+            let writer = state
+                .writer
+                .as_ref()
+                .cloned()
+                .ok_or(LiveTranscriptionClientError::NotConnected)?;
+            let (sender, receiver) = oneshot::channel();
+            state.pending_end = Some(PendingEnd {
+                request_id,
+                session_id,
+                responder: sender,
+            });
+            (writer, receiver, control, session_id)
+        };
+        if writer
+            .lock()
+            .await
+            .send(Message::Text(control.into()))
+            .await
+            .is_err()
         {
+            self.clear_pending_end(request_id, session_id).await;
+            return Err(self.mark_failed().await);
+        }
+        match wait_for_response(receiver).await {
             Ok(()) => {
+                let mut state = self.state.lock().await;
                 state.session = None;
                 state.status = LiveTranscriptionLifecycleStatus::Connected;
                 Ok(())
             }
             Err(error) => {
-                mark_failed_state(&mut state);
+                self.clear_pending_end(request_id, session_id).await;
                 Err(error)
             }
         }
@@ -429,8 +469,118 @@ impl LiveTranscriptionClient {
 
     async fn mark_failed(&self) -> LiveTranscriptionClientError {
         let mut state = self.state.lock().await;
+        fail_pending_operations(&mut state);
         mark_failed_state(&mut state);
         LiveTranscriptionClientError::ConnectionFailed
+    }
+
+    async fn clear_pending_start(&self, request_id: Uuid) {
+        let mut state = self.state.lock().await;
+        if state
+            .pending_start
+            .as_ref()
+            .is_some_and(|pending| pending.request_id == request_id)
+        {
+            state.pending_start = None;
+        }
+    }
+
+    async fn clear_pending_end(&self, request_id: Uuid, session_id: Uuid) {
+        let mut state = self.state.lock().await;
+        if state.pending_end.as_ref().is_some_and(|pending| {
+            pending.request_id == request_id && pending.session_id == session_id
+        }) {
+            state.pending_end = None;
+        }
+    }
+
+    async fn send_chunk_and_wait(
+        &self,
+        metadata: AudioChunkFrameMetadata,
+        wav_payload: &[u8],
+    ) -> Result<super::protocol::ChunkResponse, LiveTranscriptionClientError> {
+        let _operation = self.operation_lock.lock().await;
+        let (writer, receiver, frame) = {
+            let mut state = self.state.lock().await;
+            validate_chunk_admission(&state, &metadata)?;
+            if state.pending_chunk.is_some() {
+                return Err(LiveTranscriptionClientError::AlreadyActive);
+            }
+            let frame =
+                build_audio_chunk_frame(&metadata, wav_payload, state.max_binary_payload_bytes)
+                    .map_err(map_binary_error)?;
+            let writer = state
+                .writer
+                .as_ref()
+                .cloned()
+                .ok_or(LiveTranscriptionClientError::NotConnected)?;
+            let (sender, receiver) = oneshot::channel();
+            state.pending_chunk = Some(PendingChunk {
+                sequence: metadata.sequence,
+                responder: sender,
+            });
+            state
+                .session
+                .as_mut()
+                .ok_or(LiveTranscriptionClientError::SessionNotActive)?
+                .in_flight = true;
+            (writer, receiver, frame)
+        };
+
+        if writer
+            .lock()
+            .await
+            .send(Message::Binary(frame.into()))
+            .await
+            .is_err()
+        {
+            self.clear_pending_chunk(metadata.sequence).await;
+            return Err(self.mark_failed().await);
+        }
+        match wait_for_response(receiver).await {
+            Ok(response) => Ok(response),
+            Err(error) => {
+                self.clear_pending_chunk(metadata.sequence).await;
+                Err(error)
+            }
+        }
+    }
+
+    async fn clear_pending_chunk(&self, sequence: u64) {
+        let mut state = self.state.lock().await;
+        if state
+            .pending_chunk
+            .as_ref()
+            .is_some_and(|pending| pending.sequence == sequence)
+        {
+            state.pending_chunk = None;
+        }
+        if let Some(session) = state.session.as_mut() {
+            if session.expected_sequence == sequence {
+                session.in_flight = false;
+            }
+        }
+    }
+
+    async fn complete_chunk(
+        &self,
+        sequence: u64,
+        capture_started_at_seconds: Option<f64>,
+    ) -> Result<(), LiveTranscriptionClientError> {
+        let mut state = self.state.lock().await;
+        let session = state
+            .session
+            .as_mut()
+            .ok_or(LiveTranscriptionClientError::SessionNotActive)?;
+        if session.expected_sequence != sequence {
+            return Err(LiveTranscriptionClientError::InvalidSequence);
+        }
+        session.expected_sequence += 1;
+        if let Some(timestamp) = capture_started_at_seconds {
+            session.last_capture_started_at_seconds = timestamp;
+        }
+        session.in_flight = false;
+        Ok(())
     }
 }
 
@@ -458,9 +608,8 @@ pub async fn get_live_transcription_status(
     Ok(client.status().await)
 }
 
-async fn receive_server_message(
+async fn receive_handshake(
     socket: &mut LocalSocket,
-    _event_sink: &Arc<Mutex<Option<Arc<dyn AssistEventSink>>>>,
 ) -> Result<ServerMessage, LiveTranscriptionClientError> {
     match socket.next().await {
         Some(Ok(Message::Text(text))) => {
@@ -472,83 +621,152 @@ async fn receive_server_message(
     }
 }
 
-async fn receive_until_session_started(
-    socket: &mut LocalSocket,
-    request_id: Uuid,
-    event_sink: &Arc<Mutex<Option<Arc<dyn AssistEventSink>>>>,
-) -> Result<super::protocol::SessionStarted, LiveTranscriptionClientError> {
+async fn run_reader(mut reader: LocalReader, inbound: mpsc::Sender<InboundMessage>) {
     loop {
-        match receive_server_message(socket, event_sink).await? {
-            ServerMessage::SessionStarted(started) if started.request_id == request_id => {
-                return Ok(started)
+        let parsed = match reader.next().await {
+            Some(Ok(Message::Text(text))) => parse_server_message(&text)
+                .map_err(|_| LiveTranscriptionClientError::ProtocolFailed),
+            Some(Ok(Message::Close(_))) | None => {
+                Err(LiveTranscriptionClientError::ConnectionFailed)
             }
-            ServerMessage::Status => continue,
-            message @ (ServerMessage::AssistSegmentUpdate(_)
-            | ServerMessage::AssistReplySuggestions(_)) => {
-                emit_assist_event(event_sink, message).await;
-            }
-            ServerMessage::Error(error) if error.fatal => {
-                return Err(LiveTranscriptionClientError::ConnectionFailed)
-            }
-            ServerMessage::Error(_) => return Err(LiveTranscriptionClientError::ProtocolFailed),
-            _ => return Err(LiveTranscriptionClientError::ProtocolFailed),
+            Some(Ok(_)) => Err(LiveTranscriptionClientError::ProtocolFailed),
+            Some(Err(_)) => Err(LiveTranscriptionClientError::ConnectionFailed),
+        };
+        let terminal = parsed.is_err();
+        if inbound.send(parsed).await.is_err() || terminal {
+            return;
         }
     }
 }
 
-async fn receive_until_chunk_terminal(
-    socket: &mut LocalSocket,
-    sequence: u64,
+async fn run_dispatcher(
+    mut inbound: mpsc::Receiver<InboundMessage>,
+    state: Arc<Mutex<ClientState>>,
+    event_sink: Arc<Mutex<Option<Arc<dyn AssistEventSink>>>>,
+) {
+    while let Some(message) = inbound.recv().await {
+        if dispatch_message(&state, &event_sink, message).await {
+            return;
+        }
+    }
+    let mut state = state.lock().await;
+    fail_pending_operations(&mut state);
+    mark_failed_state(&mut state);
+}
+
+/// Returns true when the dispatcher must stop after a terminal transport failure.
+async fn dispatch_message(
+    state: &Arc<Mutex<ClientState>>,
     event_sink: &Arc<Mutex<Option<Arc<dyn AssistEventSink>>>>,
-) -> Result<(), LiveTranscriptionClientError> {
-    loop {
-        match receive_server_message(socket, event_sink).await? {
-            ServerMessage::ChunkResult {
-                chunk_sequence,
-                response,
-            } if chunk_sequence == sequence => {
+    message: InboundMessage,
+) -> bool {
+    match message {
+        Err(_) => {
+            let mut state = state.lock().await;
+            fail_pending_operations(&mut state);
+            mark_failed_state(&mut state);
+            true
+        }
+        Ok(ServerMessage::SessionStarted(started)) => {
+            let responder = {
+                let mut state = state.lock().await;
+                match state.pending_start.take() {
+                    Some(pending) if pending.request_id == started.request_id => {
+                        Some(pending.responder)
+                    }
+                    pending => {
+                        state.pending_start = pending;
+                        None
+                    }
+                }
+            };
+            if let Some(responder) = responder {
+                let _ = responder.send(Ok(started));
+            }
+            false
+        }
+        Ok(ServerMessage::ChunkResult {
+            chunk_sequence,
+            response,
+        }) => {
+            let responder = {
+                let mut state = state.lock().await;
+                match state.pending_chunk.take() {
+                    Some(pending) if pending.sequence == chunk_sequence => Some(pending.responder),
+                    pending => {
+                        state.pending_chunk = pending;
+                        None
+                    }
+                }
+            };
+            if let Some(responder) = responder {
                 emit_transcript_events(event_sink, &response).await;
-                return Ok(());
+                let _ = responder.send(Ok(response));
             }
-            ServerMessage::Status => continue,
+            false
+        }
+        Ok(ServerMessage::SessionStopped(stopped)) => {
+            let responder = {
+                let mut state = state.lock().await;
+                match state.pending_end.take() {
+                    Some(pending)
+                        if pending.request_id == stopped.request_id
+                            && pending.session_id == stopped.session_id =>
+                    {
+                        Some(pending.responder)
+                    }
+                    pending => {
+                        state.pending_end = pending;
+                        None
+                    }
+                }
+            };
+            if let Some(responder) = responder {
+                let _ = responder.send(Ok(()));
+            }
+            false
+        }
+        Ok(ServerMessage::Error(error)) => {
+            let mut state = state.lock().await;
+            fail_pending_operations_with(
+                &mut state,
+                if error.fatal {
+                    LiveTranscriptionClientError::ConnectionFailed
+                } else {
+                    LiveTranscriptionClientError::ProtocolFailed
+                },
+            );
+            if error.fatal {
+                mark_failed_state(&mut state);
+                true
+            } else {
+                false
+            }
+        }
+        Ok(
             message @ (ServerMessage::AssistSegmentUpdate(_)
-            | ServerMessage::AssistReplySuggestions(_)) => {
-                emit_assist_event(event_sink, message).await;
-            }
-            ServerMessage::Error(error) if error.fatal => {
-                return Err(LiveTranscriptionClientError::ConnectionFailed)
-            }
-            ServerMessage::Error(_) => return Err(LiveTranscriptionClientError::ProtocolFailed),
-            _ => return Err(LiveTranscriptionClientError::ProtocolFailed),
+            | ServerMessage::AssistReplySuggestions(_)),
+        ) => {
+            // Reserved for the later Assist Mode event router; never resolve an operation.
+            let _ = message;
+            false
+        }
+        Ok(ServerMessage::Status) => false,
+        Ok(_) => {
+            let mut state = state.lock().await;
+            fail_pending_operations_with(&mut state, LiveTranscriptionClientError::ProtocolFailed);
+            false
         }
     }
 }
 
-async fn receive_until_chunk_result(
-    socket: &mut LocalSocket,
-    sequence: u64,
-    event_sink: &Arc<Mutex<Option<Arc<dyn AssistEventSink>>>>,
-) -> Result<super::protocol::ChunkResponse, LiveTranscriptionClientError> {
-    loop {
-        match receive_server_message(socket, event_sink).await? {
-            ServerMessage::ChunkResult {
-                chunk_sequence,
-                response,
-            } if chunk_sequence == sequence => {
-                emit_transcript_events(event_sink, &response).await;
-                return Ok(response);
-            }
-            ServerMessage::Status => continue,
-            message @ (ServerMessage::AssistSegmentUpdate(_)
-            | ServerMessage::AssistReplySuggestions(_)) => {
-                emit_assist_event(event_sink, message).await;
-            }
-            ServerMessage::Error(error) if error.fatal => {
-                return Err(LiveTranscriptionClientError::ConnectionFailed)
-            }
-            ServerMessage::Error(_) => return Err(LiveTranscriptionClientError::ProtocolFailed),
-            _ => return Err(LiveTranscriptionClientError::ProtocolFailed),
-        }
+async fn wait_for_response<T>(
+    receiver: oneshot::Receiver<Result<T, LiveTranscriptionClientError>>,
+) -> Result<T, LiveTranscriptionClientError> {
+    match timeout(HANDSHAKE_TIMEOUT, receiver).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) => Err(LiveTranscriptionClientError::ConnectionFailed),
+        Err(_) => Err(LiveTranscriptionClientError::ConnectionFailed),
     }
 }
 
@@ -567,33 +785,6 @@ fn format_utc_timestamp(seconds: i64) -> Result<String, LiveTranscriptionClientE
         value.tm_min,
         value.tm_sec
     ))
-}
-
-async fn receive_until_session_stopped(
-    socket: &mut LocalSocket,
-    request_id: Uuid,
-    session_id: Uuid,
-    event_sink: &Arc<Mutex<Option<Arc<dyn AssistEventSink>>>>,
-) -> Result<(), LiveTranscriptionClientError> {
-    loop {
-        match receive_server_message(socket, event_sink).await? {
-            ServerMessage::SessionStopped(stopped)
-                if stopped.request_id == request_id && stopped.session_id == session_id =>
-            {
-                return Ok(())
-            }
-            ServerMessage::Status => continue,
-            message @ (ServerMessage::AssistSegmentUpdate(_)
-            | ServerMessage::AssistReplySuggestions(_)) => {
-                emit_assist_event(event_sink, message).await;
-            }
-            ServerMessage::Error(error) if error.fatal => {
-                return Err(LiveTranscriptionClientError::ConnectionFailed)
-            }
-            ServerMessage::Error(_) => return Err(LiveTranscriptionClientError::ProtocolFailed),
-            _ => return Err(LiveTranscriptionClientError::ProtocolFailed),
-        }
-    }
 }
 
 async fn emit_assist_event(
@@ -659,7 +850,7 @@ fn validate_chunk_admission(
 }
 
 fn mark_failed_state(state: &mut ClientState) {
-    state.socket = None;
+    state.writer = None;
     state.session = None;
     state.max_binary_payload_bytes = 0;
     state.status = LiveTranscriptionLifecycleStatus::Failed;
@@ -667,11 +858,30 @@ fn mark_failed_state(state: &mut ClientState) {
 }
 
 fn clear_disconnected(state: &mut ClientState) {
-    state.socket = None;
+    state.writer = None;
     state.session = None;
     state.max_binary_payload_bytes = 0;
     state.status = LiveTranscriptionLifecycleStatus::Disconnected;
     state.message = None;
+}
+
+fn fail_pending_operations(state: &mut ClientState) {
+    fail_pending_operations_with(state, LiveTranscriptionClientError::ConnectionFailed);
+}
+
+fn fail_pending_operations_with(state: &mut ClientState, error: LiveTranscriptionClientError) {
+    if let Some(pending) = state.pending_start.take() {
+        let _ = pending.responder.send(Err(error));
+    }
+    if let Some(pending) = state.pending_chunk.take() {
+        let _ = pending.responder.send(Err(error));
+    }
+    if let Some(pending) = state.pending_end.take() {
+        let _ = pending.responder.send(Err(error));
+    }
+    if let Some(session) = state.session.as_mut() {
+        session.in_flight = false;
+    }
 }
 
 fn public_status(state: &ClientState) -> LiveTranscriptionStatus {
@@ -684,13 +894,17 @@ fn public_status(state: &ClientState) -> LiveTranscriptionStatus {
 #[cfg(test)]
 mod tests {
     use super::{
-        clear_disconnected, mark_failed_state, validate_chunk_admission, ActiveSession,
-        ClientState, LiveTranscriptionClientError, LiveTranscriptionLifecycleStatus,
-        LiveTranscriptionStatus,
+        clear_disconnected, dispatch_message, fail_pending_operations, mark_failed_state,
+        validate_chunk_admission, ActiveSession, ClientState, LiveTranscriptionClientError,
+        LiveTranscriptionLifecycleStatus, LiveTranscriptionStatus, PendingChunk, PendingEnd,
+        PendingStart,
     };
     use crate::live_transcription::{
-        binary_frames::AudioChunkFrameMetadata, protocol::AudioSource,
+        binary_frames::AudioChunkFrameMetadata,
+        protocol::{AudioSource, ChunkResponse, ServerMessage, SessionStarted, SessionStopped},
     };
+    use std::sync::Arc;
+    use tokio::sync::{oneshot, Mutex};
     use uuid::Uuid;
 
     #[test]
@@ -763,5 +977,137 @@ mod tests {
 
         assert!(!serialized.contains("token"));
         assert_eq!(serialized, r#"{"status":"connected","message":null}"#);
+    }
+
+    #[tokio::test]
+    async fn dispatcher_resolves_matching_operation_responders() {
+        let state = Arc::new(Mutex::new(ClientState::default()));
+        let event_sink = Arc::new(Mutex::new(None));
+        let request_id = Uuid::new_v4();
+        let session_id = Uuid::new_v4();
+        let (start_sender, start_receiver) = oneshot::channel();
+        state.lock().await.pending_start = Some(PendingStart {
+            request_id,
+            responder: start_sender,
+        });
+
+        assert!(
+            !dispatch_message(
+                &state,
+                &event_sink,
+                Ok(ServerMessage::SessionStarted(SessionStarted {
+                    request_id,
+                    session_id,
+                    expected_sequence: 0,
+                })),
+            )
+            .await
+        );
+        assert_eq!(
+            start_receiver
+                .await
+                .expect("responder remains connected")
+                .expect("matching response succeeds")
+                .session_id,
+            session_id
+        );
+
+        let (end_sender, end_receiver) = oneshot::channel();
+        state.lock().await.pending_end = Some(PendingEnd {
+            request_id,
+            session_id,
+            responder: end_sender,
+        });
+        assert!(
+            !dispatch_message(
+                &state,
+                &event_sink,
+                Ok(ServerMessage::SessionStopped(SessionStopped {
+                    request_id,
+                    session_id,
+                })),
+            )
+            .await
+        );
+        assert!(end_receiver
+            .await
+            .expect("responder remains connected")
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn dispatcher_does_not_resolve_a_mismatched_chunk() {
+        let state = Arc::new(Mutex::new(ClientState::default()));
+        let event_sink = Arc::new(Mutex::new(None));
+        let (sender, mut receiver) = oneshot::channel();
+        state.lock().await.pending_chunk = Some(PendingChunk {
+            sequence: 4,
+            responder: sender,
+        });
+
+        assert!(
+            !dispatch_message(
+                &state,
+                &event_sink,
+                Ok(ServerMessage::ChunkResult {
+                    chunk_sequence: 5,
+                    response: ChunkResponse {
+                        skipped_silence: true,
+                        accepted_segments: Vec::new(),
+                    },
+                }),
+            )
+            .await
+        );
+        assert!(receiver.try_recv().is_err());
+        assert!(state.lock().await.pending_chunk.is_some());
+    }
+
+    #[test]
+    fn disconnect_cleanup_fails_all_pending_responders() {
+        let mut state = ClientState::default();
+        let (start_sender, start_receiver) = oneshot::channel();
+        let (chunk_sender, chunk_receiver) = oneshot::channel();
+        let (end_sender, end_receiver) = oneshot::channel();
+        state.pending_start = Some(PendingStart {
+            request_id: Uuid::new_v4(),
+            responder: start_sender,
+        });
+        state.pending_chunk = Some(PendingChunk {
+            sequence: 0,
+            responder: chunk_sender,
+        });
+        state.pending_end = Some(PendingEnd {
+            request_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            responder: end_sender,
+        });
+
+        fail_pending_operations(&mut state);
+
+        assert_eq!(
+            start_receiver
+                .blocking_recv()
+                .expect("sender resolves")
+                .err()
+                .expect("disconnect fails start"),
+            LiveTranscriptionClientError::ConnectionFailed
+        );
+        assert_eq!(
+            chunk_receiver
+                .blocking_recv()
+                .expect("sender resolves")
+                .err()
+                .expect("disconnect fails chunk"),
+            LiveTranscriptionClientError::ConnectionFailed
+        );
+        assert_eq!(
+            end_receiver
+                .blocking_recv()
+                .expect("sender resolves")
+                .err()
+                .expect("disconnect fails end"),
+            LiveTranscriptionClientError::ConnectionFailed
+        );
     }
 }
