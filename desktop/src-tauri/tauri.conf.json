@@ -29,7 +29,7 @@
     "active": false,
     "targets": ["app"],
     "macOS": {
-      "minimumSystemVersion": "13.0"
+      "minimumSystemVersion": "15.0"
     }
   }
 }

@@ -4,4 +4,5 @@
 
 pub(crate) mod bridge;
 pub(crate) mod status;
+pub(crate) mod swift_bridge;
 pub(crate) mod types;
