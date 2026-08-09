@@ -1,7 +1,13 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { getMeetingDetail, listMeetings } from "../history/client";
+import {
+  generateMeetingTranslation,
+  getMeetingDetail,
+  getMeetingTranslation,
+  listMeetings,
+} from "../history/client";
 import type { MeetingDetail, MeetingHistoryItem } from "../history/types";
+import type { MeetingTranslationArtifact } from "../history/translationTypes";
 
 const HISTORY_LIMIT = 100;
 
@@ -142,18 +148,164 @@ function MeetingDetailPanel({
       <p>Status: {detail.status}</p>
       <p>Started: {displayTimestamp(detail.startedAt)}</p>
       <p>Ended: {displayTimestamp(detail.endedAt)}</p>
-      <div className="meeting-transcript" aria-label="Original Meeting transcript">
-        {detail.transcript.length === 0 && <p className="meeting-transcript-empty">No transcript entries.</p>}
-        {detail.transcript.map((entry) => (
-          <article className="meeting-transcript-row" key={entry.transcriptId}>
-            <header>
-              <time dateTime={entry.timestamp}>{displayTimestamp(entry.timestamp)}</time>
-              <span>{entry.speaker}</span>
-            </header>
-            <p>{entry.text}</p>
-          </article>
-        ))}
-      </div>
+      <MeetingTranslationPanel key={detail.meetingId} detail={detail} />
     </article>
+  );
+}
+
+type TranslationState =
+  | { kind: "idle" }
+  | { kind: "loading" }
+  | { kind: "ready"; artifact: MeetingTranslationArtifact }
+  | { kind: "generating" }
+  | { kind: "unavailable" }
+  | { kind: "failed" };
+
+type TranscriptDisplay = "original" | "turkish" | "side-by-side";
+
+function MeetingTranslationPanel({ detail }: { detail: MeetingDetail }) {
+  const [translation, setTranslation] = useState<TranslationState>({ kind: "idle" });
+  const [display, setDisplay] = useState<TranscriptDisplay>("original");
+  const mounted = useRef(true);
+
+  useEffect(() => {
+    mounted.current = true;
+    setTranslation({ kind: "loading" });
+    setDisplay("original");
+    void getMeetingTranslation(detail.meetingId)
+      .then((artifact) => {
+        if (!mounted.current) return;
+        if (artifact === null) {
+          setTranslation({ kind: "unavailable" });
+        } else if (artifact.meetingId === detail.meetingId) {
+          setTranslation({ kind: "ready", artifact });
+        } else {
+          setTranslation({ kind: "failed" });
+        }
+      })
+      .catch(() => {
+        if (mounted.current) setTranslation({ kind: "failed" });
+      });
+    return () => {
+      mounted.current = false;
+    };
+  }, [detail.meetingId]);
+
+  const translationsByTranscriptId = useMemo(() => {
+    if (translation.kind !== "ready") return new Map<string, string>();
+    return new Map(
+      translation.artifact.segments.map((segment) => [
+        segment.transcriptId,
+        segment.translatedText,
+      ]),
+    );
+  }, [translation]);
+
+  const generate = async (): Promise<void> => {
+    if (translation.kind === "loading" || translation.kind === "generating") return;
+    const forceRegenerate = translation.kind === "ready";
+    setTranslation({ kind: "generating" });
+    try {
+      const artifact = await generateMeetingTranslation(
+        detail.meetingId,
+        forceRegenerate,
+      );
+      if (!mounted.current) return;
+      setTranslation(
+        artifact.meetingId === detail.meetingId
+          ? { kind: "ready", artifact }
+          : { kind: "failed" },
+      );
+    } catch {
+      if (mounted.current) setTranslation({ kind: "failed" });
+    }
+  };
+
+  const pending = translation.kind === "loading" || translation.kind === "generating";
+  const translationReady = translation.kind === "ready";
+  const activeDisplay = translation.kind === "generating" ? "original" : display;
+
+  return (
+    <section className="meeting-translation" aria-labelledby="translation-title">
+      <header className="translation-header">
+        <h4 id="translation-title">Turkish Translation</h4>
+        <button type="button" disabled={pending} onClick={() => void generate()}>
+          {translation.kind === "generating"
+            ? "Generating…"
+            : translationReady
+              ? "Regenerate Translation"
+              : "Generate Turkish Translation"}
+        </button>
+      </header>
+      <p className="translation-status" aria-live="polite">
+        {translation.kind === "loading" && "Checking for a Turkish translation…"}
+        {translation.kind === "generating" && "Generating Turkish translation…"}
+        {translation.kind === "unavailable" && "No Turkish translation yet."}
+        {translation.kind === "failed" && "Translation is temporarily unavailable."}
+        {translationReady && (
+          <>
+            Translation version {translation.artifact.version} · {translation.artifact.completedAt === null
+              ? "Completed time unavailable"
+              : `Completed ${displayTimestamp(translation.artifact.completedAt)}`}
+          </>
+        )}
+      </p>
+      <fieldset className="transcript-display-toggle" disabled={translation.kind === "generating"}>
+        <legend>Transcript display</legend>
+        <label>
+          <input
+            type="radio"
+            name={`transcript-display-${detail.meetingId}`}
+            checked={activeDisplay === "original"}
+            onChange={() => setDisplay("original")}
+          />
+          Original
+        </label>
+        <label>
+          <input
+            type="radio"
+            name={`transcript-display-${detail.meetingId}`}
+            checked={activeDisplay === "turkish"}
+            onChange={() => setDisplay("turkish")}
+          />
+          Turkish
+        </label>
+        <label>
+          <input
+            type="radio"
+            name={`transcript-display-${detail.meetingId}`}
+            checked={activeDisplay === "side-by-side"}
+            onChange={() => setDisplay("side-by-side")}
+          />
+          Side by side
+        </label>
+      </fieldset>
+      <div className="meeting-transcript" aria-label="Meeting transcript">
+        {detail.transcript.length === 0 && (
+          <p className="meeting-transcript-empty">No transcript entries.</p>
+        )}
+        {detail.transcript.map((entry) => {
+          const translatedText = translationsByTranscriptId.get(entry.transcriptId);
+          const missingTranslation = translationReady && translatedText === undefined;
+          return (
+            <article
+              className={`meeting-transcript-row ${activeDisplay === "side-by-side" ? "side-by-side" : ""}`}
+              key={entry.transcriptId}
+            >
+              <header>
+                <time dateTime={entry.timestamp}>{displayTimestamp(entry.timestamp)}</time>
+                <span>{entry.speaker}</span>
+              </header>
+              {activeDisplay !== "turkish" && <p>{entry.text}</p>}
+              {activeDisplay !== "original" && translationReady && (
+                <p className="meeting-translated-text">
+                  {missingTranslation ? "Turkish translation unavailable." : translatedText}
+                </p>
+              )}
+            </article>
+          );
+        })}
+      </div>
+    </section>
   );
 }

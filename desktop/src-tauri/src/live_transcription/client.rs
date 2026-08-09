@@ -385,6 +385,74 @@ impl LiveTranscriptionClient {
             .map_err(|_| LiveTranscriptionClientError::ProtocolFailed)
     }
 
+    async fn get_meeting_translation(
+        &self,
+        meeting_id: Uuid,
+        version: Option<u16>,
+    ) -> Result<Option<MeetingTranslationArtifact>, LiveTranscriptionClientError> {
+        if version == Some(0) {
+            return Err(LiveTranscriptionClientError::ProtocolFailed);
+        }
+        let connection = self
+            .sidecar_manager
+            .live_transcription_connection()
+            .await
+            .map_err(|_| LiveTranscriptionClientError::NotConnected)?;
+        let version_query = version.map_or_else(String::new, |value| format!("?version={value}"));
+        let response = reqwest::Client::new()
+            .get(format!(
+                "http://{}:{}/api/v1/meetings/{meeting_id}/translation{version_query}",
+                connection.host, connection.port
+            ))
+            .send()
+            .await
+            .map_err(|_| LiveTranscriptionClientError::ConnectionFailed)?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if response.status() != StatusCode::OK {
+            return Err(LiveTranscriptionClientError::ProtocolFailed);
+        }
+        let payload = response
+            .text()
+            .await
+            .map_err(|_| LiveTranscriptionClientError::ProtocolFailed)?;
+        serde_json::from_str::<MeetingTranslationArtifact>(&payload)
+            .map(Some)
+            .map_err(|_| LiveTranscriptionClientError::ProtocolFailed)
+    }
+
+    async fn generate_meeting_translation(
+        &self,
+        meeting_id: Uuid,
+        force_regenerate: bool,
+    ) -> Result<GeneratedMeetingTranslationArtifact, LiveTranscriptionClientError> {
+        let connection = self
+            .sidecar_manager
+            .live_transcription_connection()
+            .await
+            .map_err(|_| LiveTranscriptionClientError::NotConnected)?;
+        let response = reqwest::Client::new()
+            .post(format!(
+                "http://{}:{}/api/v1/meetings/{meeting_id}/translation",
+                connection.host, connection.port
+            ))
+            .header("content-type", "application/json")
+            .body(serde_json::json!({ "force_regenerate": force_regenerate }).to_string())
+            .send()
+            .await
+            .map_err(|_| LiveTranscriptionClientError::ConnectionFailed)?;
+        if response.status() != StatusCode::OK {
+            return Err(LiveTranscriptionClientError::ProtocolFailed);
+        }
+        let payload = response
+            .text()
+            .await
+            .map_err(|_| LiveTranscriptionClientError::ProtocolFailed)?;
+        serde_json::from_str::<GeneratedMeetingTranslationArtifact>(&payload)
+            .map_err(|_| LiveTranscriptionClientError::ProtocolFailed)
+    }
+
     /// Begin one validated backend session. This remains Rust-internal until audio capture exists.
     pub(crate) async fn start_session(
         &self,
@@ -780,6 +848,46 @@ pub struct MeetingDetail {
     audio_has_gaps: bool,
 }
 
+/// One transcript-correlated Turkish translation segment from the public API.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all(deserialize = "snake_case", serialize = "camelCase"))]
+pub struct TranslationArtifactSegment {
+    transcript_id: Uuid,
+    source_text: String,
+    translated_text: String,
+}
+
+/// Safe persisted Turkish translation metadata and its ordered segments.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all(deserialize = "snake_case", serialize = "camelCase"))]
+pub struct MeetingTranslationArtifact {
+    artifact_id: Uuid,
+    meeting_id: Uuid,
+    version: u32,
+    target_language: String,
+    status: String,
+    created_at: String,
+    completed_at: Option<String>,
+    source_transcript_count: usize,
+    segments: Vec<TranslationArtifactSegment>,
+}
+
+/// Generation response adds only whether the completed artifact was reused.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all(deserialize = "snake_case", serialize = "camelCase"))]
+pub struct GeneratedMeetingTranslationArtifact {
+    artifact_id: Uuid,
+    meeting_id: Uuid,
+    version: u32,
+    target_language: String,
+    status: String,
+    created_at: String,
+    completed_at: Option<String>,
+    source_transcript_count: usize,
+    segments: Vec<TranslationArtifactSegment>,
+    reused_existing: bool,
+}
+
 /// Start a session with configuration fixed for its entire lifecycle.
 #[tauri::command]
 pub async fn start_live_transcription_session(
@@ -843,6 +951,32 @@ pub async fn get_meeting_detail(
         .get_meeting_detail(meeting_id)
         .await
         .map_err(|_| "Meeting detail is unavailable.".to_owned())
+}
+
+/// Return an existing completed Turkish translation, if one is available.
+#[tauri::command]
+pub async fn get_meeting_translation(
+    client: State<'_, LiveTranscriptionClient>,
+    meeting_id: Uuid,
+    version: Option<u16>,
+) -> Result<Option<MeetingTranslationArtifact>, String> {
+    client
+        .get_meeting_translation(meeting_id, version)
+        .await
+        .map_err(|_| "Translation is temporarily unavailable.".to_owned())
+}
+
+/// Generate or explicitly regenerate one completed Turkish translation artifact.
+#[tauri::command]
+pub async fn generate_meeting_translation(
+    client: State<'_, LiveTranscriptionClient>,
+    meeting_id: Uuid,
+    force_regenerate: bool,
+) -> Result<GeneratedMeetingTranslationArtifact, String> {
+    client
+        .generate_meeting_translation(meeting_id, force_regenerate)
+        .await
+        .map_err(|_| "Translation is temporarily unavailable.".to_owned())
 }
 
 #[tauri::command]
@@ -1199,8 +1333,8 @@ mod tests {
     use super::{
         clear_disconnected, dispatch_message, fail_pending_operations, mark_failed_state,
         validate_chunk_admission, ActiveSession, ClientState, LiveTranscriptionClientError,
-        LiveTranscriptionLifecycleStatus, LiveTranscriptionStatus, PendingChunk, PendingEnd,
-        PendingStart,
+        LiveTranscriptionLifecycleStatus, LiveTranscriptionStatus, MeetingTranslationArtifact,
+        PendingChunk, PendingEnd, PendingStart,
     };
     use crate::{
         assist_mode::events::{
@@ -1349,6 +1483,34 @@ mod tests {
 
         assert!(!serialized.contains("token"));
         assert_eq!(serialized, r#"{"status":"connected","message":null}"#);
+    }
+
+    #[test]
+    fn translation_payload_reads_backend_case_and_exposes_only_public_fields() {
+        let artifact = serde_json::from_str::<MeetingTranslationArtifact>(
+            r#"{
+                "artifact_id":"00000000-0000-0000-0000-000000000002",
+                "meeting_id":"00000000-0000-0000-0000-000000000001",
+                "version":1,
+                "target_language":"tr",
+                "status":"completed",
+                "created_at":"2026-01-01T00:00:00+00:00",
+                "completed_at":"2026-01-01T00:01:00+00:00",
+                "source_transcript_count":1,
+                "segments":[{
+                    "transcript_id":"00000000-0000-0000-0000-000000000003",
+                    "source_text":"Original.",
+                    "translated_text":"Çeviri."
+                }]
+            }"#,
+        )
+        .expect("backend payload parses");
+        let serialized = serde_json::to_string(&artifact).expect("public payload serializes");
+
+        assert!(serialized.contains("transcriptId"));
+        assert!(!serialized.contains("provider"));
+        assert!(!serialized.contains("prompt"));
+        assert!(!serialized.contains("failure"));
     }
 
     #[tokio::test]
