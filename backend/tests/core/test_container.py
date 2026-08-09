@@ -9,14 +9,19 @@ from app.application.use_cases import (
     AddTranscriptUseCase,
     CreateMeetingUseCase,
     EndMeetingUseCase,
+    FinalizeRecordingUseCase,
     GenerateMeetingReviewUseCase,
     GenerateMeetingTranslationUseCase,
     GetMeetingReviewUseCase,
     GetMeetingTranslationUseCase,
+    MarkRecordingFailedUseCase,
+    MarkRecordingStartedUseCase,
+    PrepareRecordingSessionUseCase,
     ProcessLiveAudioChunkUseCase,
     RenameMeetingUseCase,
     StartLiveTranscriptionSessionUseCase,
     StartMeetingUseCase,
+    WriteRecordingSegmentUseCase,
 )
 from app.core.config import Settings
 from app.core.container import Container
@@ -143,6 +148,25 @@ def test_use_case_factories_return_working_use_cases_after_start() -> None:
     assert isinstance(container.get_rename_meeting_use_case(), RenameMeetingUseCase)
     assert isinstance(container.get_end_meeting_use_case(), EndMeetingUseCase)
     assert isinstance(
+        container.get_prepare_recording_session_use_case(),
+        PrepareRecordingSessionUseCase,
+    )
+    assert isinstance(
+        container.get_mark_recording_started_use_case(),
+        MarkRecordingStartedUseCase,
+    )
+    assert isinstance(
+        container.get_write_recording_segment_use_case(),
+        WriteRecordingSegmentUseCase,
+    )
+    assert isinstance(
+        container.get_finalize_recording_use_case(), FinalizeRecordingUseCase
+    )
+    assert isinstance(
+        container.get_mark_recording_failed_use_case(),
+        MarkRecordingFailedUseCase,
+    )
+    assert isinstance(
         container.get_start_live_transcription_session_use_case(),
         StartLiveTranscriptionSessionUseCase,
     )
@@ -193,6 +217,16 @@ def test_use_case_factories_raise_before_start() -> None:
         container.get_generate_meeting_review_use_case()
     with pytest.raises(RuntimeError, match="has not been started"):
         container.get_get_meeting_review_use_case()
+    with pytest.raises(RuntimeError, match="has not been started"):
+        container.get_prepare_recording_session_use_case()
+    with pytest.raises(RuntimeError, match="has not been started"):
+        container.get_mark_recording_started_use_case()
+    with pytest.raises(RuntimeError, match="has not been started"):
+        container.get_write_recording_segment_use_case()
+    with pytest.raises(RuntimeError, match="has not been started"):
+        container.get_finalize_recording_use_case()
+    with pytest.raises(RuntimeError, match="has not been started"):
+        container.get_mark_recording_failed_use_case()
 
 
 def test_translation_factories_are_fresh_and_do_not_call_provider_at_startup() -> None:

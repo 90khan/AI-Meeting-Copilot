@@ -43,6 +43,9 @@ from app.application.use_cases.translate_transcript_segment import (
     TranslateTranscriptSegmentUseCase,
 )
 from app.application.use_cases.update_audio_retention import UpdateAudioRetentionUseCase
+from app.application.use_cases.write_recording_segment import (
+    WriteRecordingSegmentUseCase,
+)
 
 __all__ = [
     "AddTranscriptUseCase",
@@ -68,4 +71,5 @@ __all__ = [
     "StartMeetingUseCase",
     "TranslateTranscriptSegmentUseCase",
     "UpdateAudioRetentionUseCase",
+    "WriteRecordingSegmentUseCase",
 ]

@@ -12,6 +12,7 @@ from app.api.routes.meeting_history import router as meeting_history_router
 from app.api.routes.meeting_review import router as meeting_review_router
 from app.api.routes.meeting_translation import router as meeting_translation_router
 from app.api.routes.meetings import router as meetings_router
+from app.api.routes.recording_capture import router as recording_capture_router
 from app.api.routes.recording_playback import router as recording_playback_router
 from app.core.config import Settings, get_settings
 from app.core.container import Container
@@ -50,4 +51,5 @@ def create_app(
     app.include_router(meeting_review_router)
     app.include_router(meeting_translation_router)
     app.include_router(recording_playback_router)
+    app.include_router(recording_capture_router)
     return app

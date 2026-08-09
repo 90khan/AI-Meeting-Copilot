@@ -44,6 +44,7 @@ from app.application.use_cases import (
     CreateMeetingUseCase,
     DeleteMeetingAudioUseCase,
     EndMeetingUseCase,
+    FinalizeRecordingUseCase,
     GenerateMeetingReviewUseCase,
     GenerateMeetingTranslationUseCase,
     GenerateReplySuggestionsUseCase,
@@ -51,6 +52,9 @@ from app.application.use_cases import (
     GetMeetingReviewUseCase,
     GetMeetingTranslationUseCase,
     ListMeetingsUseCase,
+    MarkRecordingFailedUseCase,
+    MarkRecordingStartedUseCase,
+    PrepareRecordingSessionUseCase,
     ProcessLiveAudioChunkUseCase,
     ReconcileRecordingStorageUseCase,
     RenameMeetingUseCase,
@@ -59,6 +63,7 @@ from app.application.use_cases import (
     StartMeetingUseCase,
     TranslateTranscriptSegmentUseCase,
     UpdateAudioRetentionUseCase,
+    WriteRecordingSegmentUseCase,
 )
 from app.core.config import Settings
 from app.core.logging import get_logger, setup_logging
@@ -352,6 +357,44 @@ class Container:
             recording_storage=self.get_recording_storage(),
             recording_key_store=self.get_recording_key_store(),
         )
+
+    def get_prepare_recording_session_use_case(self) -> PrepareRecordingSessionUseCase:
+        """Create one recording-preparation use case for this active lifecycle."""
+
+        self._require_started()
+        return PrepareRecordingSessionUseCase(
+            unit_of_work_factory=self.get_unit_of_work,
+            recording_key_store=self.get_recording_key_store(),
+            clock=_utc_now,
+            uuid_factory=uuid4,
+        )
+
+    def get_mark_recording_started_use_case(self) -> MarkRecordingStartedUseCase:
+        """Create one recording-start transition use case."""
+
+        self._require_started()
+        return MarkRecordingStartedUseCase(self.get_unit_of_work)
+
+    def get_write_recording_segment_use_case(self) -> WriteRecordingSegmentUseCase:
+        """Create one sequential encrypted recording-segment writer."""
+
+        self._require_started()
+        return WriteRecordingSegmentUseCase(
+            unit_of_work_factory=self.get_unit_of_work,
+            recording_storage=self.get_recording_storage(),
+        )
+
+    def get_finalize_recording_use_case(self) -> FinalizeRecordingUseCase:
+        """Create one recording-finalization use case."""
+
+        self._require_started()
+        return FinalizeRecordingUseCase(self.get_unit_of_work)
+
+    def get_mark_recording_failed_use_case(self) -> MarkRecordingFailedUseCase:
+        """Create one privacy-safe recording-failure use case."""
+
+        self._require_started()
+        return MarkRecordingFailedUseCase(self.get_unit_of_work)
 
     def get_recording_retention_cleanup_service(
         self,

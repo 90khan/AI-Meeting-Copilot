@@ -98,3 +98,28 @@ class MarkRecordingFailedCommand:
             or self.failure_code not in self._ALLOWED_FAILURE_CODES
         ):
             raise ApplicationValidationError("Recording failure code is invalid.")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class WriteRecordingSegmentCommand:
+    """Request persistence of one already-validated WAV recording segment."""
+
+    recording_id: UUID
+    segment_index: int
+    wav_bytes: bytes
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.recording_id, UUID):
+            raise ApplicationValidationError("Recording identity is invalid.")
+        if not isinstance(self.segment_index, int) or self.segment_index < 0:
+            raise ApplicationValidationError("Recording segment index is invalid.")
+        if not isinstance(self.wav_bytes, bytes) or not self.wav_bytes:
+            raise ApplicationValidationError("Recording segment data is invalid.")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class WriteRecordingSegmentResult:
+    """Safe result of persisting one recording segment."""
+
+    recording_id: UUID
+    segment_index: int

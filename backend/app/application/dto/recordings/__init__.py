@@ -32,6 +32,8 @@ from app.application.dto.recordings.recording_session import (
     MarkRecordingStartedCommand,
     PrepareRecordingSessionCommand,
     PrepareRecordingSessionResult,
+    WriteRecordingSegmentCommand,
+    WriteRecordingSegmentResult,
 )
 from app.application.dto.recordings.retention import RecordingRetentionPolicy
 from app.application.dto.recordings.retention_update import (
@@ -66,4 +68,6 @@ __all__ = [
     "RecordingState",
     "UpdateAudioRetentionCommand",
     "UpdateAudioRetentionResult",
+    "WriteRecordingSegmentCommand",
+    "WriteRecordingSegmentResult",
 ]
