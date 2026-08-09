@@ -17,7 +17,7 @@ use live_transcription::client::{
 };
 use recording_playback::manager::{
     get_recording_playback_info, get_recording_playback_status, prepare_recording_playback,
-    stop_recording_playback, RecordingPlaybackManager,
+    start_recording_playback_stream, stop_recording_playback, RecordingPlaybackManager,
 };
 use sidecar::manager::{get_backend_status, start_backend, stop_backend, SidecarManager};
 use tauri::Manager;
@@ -60,6 +60,7 @@ pub fn run() {
             stop_audio_capture,
             get_recording_playback_info,
             prepare_recording_playback,
+            start_recording_playback_stream,
             stop_recording_playback,
             get_recording_playback_status,
         ])

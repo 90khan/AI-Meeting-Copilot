@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -28,6 +29,22 @@ pub struct RecordingPlaybackInfo {
 pub struct RecordingPlaybackStatus {
     pub state: RecordingPlaybackState,
     pub info: Option<RecordingPlaybackInfo>,
+}
+
+/// Plaintext audio is intentionally an internal, non-serializable boundary.
+pub(crate) struct PlaybackAudioChunk {
+    pub(crate) segment_index: u32,
+    pub(crate) bytes: Vec<u8>,
+}
+
+impl fmt::Debug for PlaybackAudioChunk {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PlaybackAudioChunk")
+            .field("segment_index", &self.segment_index)
+            .field("byte_length", &self.bytes.len())
+            .finish()
+    }
 }
 
 #[derive(Deserialize)]
