@@ -84,6 +84,7 @@ from app.infrastructure.providers.ollama import (
     OllamaTranslationProvider,
 )
 from app.infrastructure.recordings import (
+    EncryptedRecordingPlaybackReader,
     EncryptedRecordingStorage,
     MacOSKeychainRecordingKeyStore,
     RecordingStorageMetadataResolver,
@@ -340,6 +341,17 @@ class Container:
         if self._recording_storage is None:
             raise RuntimeError("Recording infrastructure is not configured.")
         return self._recording_storage
+
+    def get_recording_playback_reader(self) -> EncryptedRecordingPlaybackReader:
+        """Create one trusted local streaming playback reader."""
+
+        self._require_started()
+        resolver = RecordingStorageMetadataResolver(self.get_unit_of_work)
+        return EncryptedRecordingPlaybackReader(
+            metadata_resolver=resolver.resolve_for_meeting,
+            recording_storage=self.get_recording_storage(),
+            recording_key_store=self.get_recording_key_store(),
+        )
 
     def get_recording_retention_cleanup_service(
         self,
