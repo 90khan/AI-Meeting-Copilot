@@ -3,6 +3,9 @@
 from app.application.interfaces.ai.german_simplification import (
     GermanSimplificationProvider,
 )
+from app.application.interfaces.ai.meeting_review_generation import (
+    MeetingReviewGenerationProvider,
+)
 from app.application.interfaces.ai.meeting_summarization import (
     MeetingSummarizationProvider,
 )
@@ -20,6 +23,7 @@ from app.application.interfaces.ai.translation import TranslationProvider
 __all__ = [
     "GermanSimplificationProvider",
     "GermanSimplificationProviderFactory",
+    "MeetingReviewGenerationProvider",
     "MeetingSummarizationProvider",
     "MeetingSummarizationProviderFactory",
     "ReplyCoachingProvider",

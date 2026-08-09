@@ -5,6 +5,9 @@ from app.application.use_cases.create_meeting import CreateMeetingUseCase
 from app.application.use_cases.delete_meeting_audio import DeleteMeetingAudioUseCase
 from app.application.use_cases.end_meeting import EndMeetingUseCase
 from app.application.use_cases.finalize_recording import FinalizeRecordingUseCase
+from app.application.use_cases.generate_meeting_review import (
+    GenerateMeetingReviewUseCase,
+)
 from app.application.use_cases.generate_meeting_translation import (
     GenerateMeetingTranslationUseCase,
 )
@@ -46,6 +49,7 @@ __all__ = [
     "DeleteMeetingAudioUseCase",
     "EndMeetingUseCase",
     "FinalizeRecordingUseCase",
+    "GenerateMeetingReviewUseCase",
     "GenerateMeetingTranslationUseCase",
     "GenerateReplySuggestionsUseCase",
     "GetMeetingDetailUseCase",
