@@ -8,8 +8,14 @@ from app.application.dto.meeting_review.translation_artifact import (
     TranslationArtifactSegment,
     TranslationArtifactStatus,
 )
+from app.application.dto.meeting_review.translation_generation import (
+    GenerateMeetingTranslationCommand,
+    GenerateMeetingTranslationResult,
+)
 
 __all__ = [
+    "GenerateMeetingTranslationCommand",
+    "GenerateMeetingTranslationResult",
     "MeetingDetail",
     "MeetingHistoryItem",
     "MeetingTranslationArtifact",
