@@ -3,6 +3,7 @@ import { useEffect, useReducer, useState } from "react";
 import { subscribeToAssistEvents } from "./assist/events";
 import { assistReducer, initialAssistState } from "./assist/state";
 import { AssistModePanel } from "./components/AssistModePanel";
+import { MeetingHistoryPanel } from "./components/MeetingHistoryPanel";
 
 import {
   getAudioCaptureStatus,
@@ -50,6 +51,7 @@ function statusLabel(status: string | null): string {
 }
 
 export default function App() {
+  const [view, setView] = useState<"live" | "history">("live");
   const [backendStatus, setBackendStatus] = useState<BackendStatus | null>(null);
   const [liveStatus, setLiveStatus] = useState<LiveTranscriptionStatus | null>(null);
   const [captureStatus, setCaptureStatus] = useState<AudioCaptureStatus | null>(null);
@@ -293,6 +295,26 @@ export default function App() {
     <main className="app-shell">
       <section className="app-panel" aria-labelledby="application-title">
         <h1 id="application-title">AI Meeting Copilot</h1>
+        <nav className="view-switch" aria-label="Application views">
+          <button
+            type="button"
+            aria-pressed={view === "live"}
+            onClick={() => setView("live")}
+          >
+            Live
+          </button>
+          <button
+            type="button"
+            aria-pressed={view === "history"}
+            onClick={() => setView("history")}
+          >
+            History
+          </button>
+        </nav>
+        {view === "history" ? (
+          <MeetingHistoryPanel backendReady={backendStatus?.status === "ready"} />
+        ) : (
+          <>
         <p className="backend-status" aria-live="polite">
           Backend status: <strong>{statusLabel(backendStatus?.status ?? null)}</strong>
         </p>
@@ -385,6 +407,8 @@ export default function App() {
         {assistEnabled && <AssistModePanel state={assistState} />}
         {(errorMessage || backendStatus?.status === "failed" || captureStatus?.state === "failed") && (
           <p className="backend-error" role="alert">{errorMessage ?? "A local component is unavailable."}</p>
+        )}
+          </>
         )}
       </section>
     </main>

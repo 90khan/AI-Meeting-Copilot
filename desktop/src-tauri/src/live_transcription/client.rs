@@ -325,6 +325,66 @@ impl LiveTranscriptionClient {
         }
     }
 
+    async fn list_meetings(
+        &self,
+        limit: u16,
+        offset: u32,
+    ) -> Result<MeetingHistoryResponse, LiveTranscriptionClientError> {
+        if !(1..=500).contains(&limit) {
+            return Err(LiveTranscriptionClientError::ProtocolFailed);
+        }
+        let connection = self
+            .sidecar_manager
+            .live_transcription_connection()
+            .await
+            .map_err(|_| LiveTranscriptionClientError::NotConnected)?;
+        let response = reqwest::Client::new()
+            .get(format!(
+                "http://{}:{}/api/v1/meetings?limit={limit}&offset={offset}",
+                connection.host, connection.port
+            ))
+            .send()
+            .await
+            .map_err(|_| LiveTranscriptionClientError::ConnectionFailed)?;
+        if response.status() != StatusCode::OK {
+            return Err(LiveTranscriptionClientError::ProtocolFailed);
+        }
+        let payload = response
+            .text()
+            .await
+            .map_err(|_| LiveTranscriptionClientError::ProtocolFailed)?;
+        serde_json::from_str::<MeetingHistoryResponse>(&payload)
+            .map_err(|_| LiveTranscriptionClientError::ProtocolFailed)
+    }
+
+    async fn get_meeting_detail(
+        &self,
+        meeting_id: Uuid,
+    ) -> Result<MeetingDetail, LiveTranscriptionClientError> {
+        let connection = self
+            .sidecar_manager
+            .live_transcription_connection()
+            .await
+            .map_err(|_| LiveTranscriptionClientError::NotConnected)?;
+        let response = reqwest::Client::new()
+            .get(format!(
+                "http://{}:{}/api/v1/meetings/{meeting_id}",
+                connection.host, connection.port
+            ))
+            .send()
+            .await
+            .map_err(|_| LiveTranscriptionClientError::ConnectionFailed)?;
+        if response.status() != StatusCode::OK {
+            return Err(LiveTranscriptionClientError::ProtocolFailed);
+        }
+        let payload = response
+            .text()
+            .await
+            .map_err(|_| LiveTranscriptionClientError::ProtocolFailed)?;
+        serde_json::from_str::<MeetingDetail>(&payload)
+            .map_err(|_| LiveTranscriptionClientError::ProtocolFailed)
+    }
+
     /// Begin one validated backend session. This remains Rust-internal until audio capture exists.
     pub(crate) async fn start_session(
         &self,
@@ -660,9 +720,64 @@ pub struct CreateMeetingInput {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all(deserialize = "snake_case", serialize = "camelCase"))]
 pub struct MeetingIdentifier {
     meeting_id: Uuid,
+}
+
+/// Privacy-safe persisted Meeting data exposed only through the desktop command.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all(deserialize = "snake_case", serialize = "camelCase"))]
+pub struct MeetingHistoryItem {
+    meeting_id: Uuid,
+    title: String,
+    status: String,
+    created_at: String,
+    started_at: Option<String>,
+    ended_at: Option<String>,
+    transcript_count: usize,
+    recording_available: bool,
+    recording_state: Option<String>,
+    audio_expires_at: Option<String>,
+    audio_protected: bool,
+}
+
+/// Bounded Meeting History listing response with no recording-storage details.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all(deserialize = "snake_case", serialize = "camelCase"))]
+pub struct MeetingHistoryResponse {
+    meetings: Vec<MeetingHistoryItem>,
+}
+
+/// One original persisted transcript row, intentionally without enrichments.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all(deserialize = "snake_case", serialize = "camelCase"))]
+pub struct TranscriptReadItem {
+    transcript_id: Uuid,
+    text: String,
+    timestamp: String,
+    speaker: String,
+    source: String,
+}
+
+/// Full original transcript detail exposed through the local desktop command.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all(deserialize = "snake_case", serialize = "camelCase"))]
+pub struct MeetingDetail {
+    meeting_id: Uuid,
+    title: String,
+    status: String,
+    created_at: String,
+    started_at: Option<String>,
+    ended_at: Option<String>,
+    transcript_count: usize,
+    recording_available: bool,
+    recording_state: Option<String>,
+    audio_expires_at: Option<String>,
+    audio_protected: bool,
+    transcript: Vec<TranscriptReadItem>,
+    recording_duration_seconds: Option<f64>,
+    audio_has_gaps: bool,
 }
 
 /// Start a session with configuration fixed for its entire lifecycle.
@@ -703,6 +818,31 @@ pub async fn start_meeting(
         .start_meeting(meeting_id)
         .await
         .map_err(|_| "The Meeting could not be started.".to_owned())
+}
+
+/// Read persisted Meeting summaries through the sidecar-owned loopback boundary.
+#[tauri::command]
+pub async fn list_meetings(
+    client: State<'_, LiveTranscriptionClient>,
+    limit: u16,
+    offset: u32,
+) -> Result<MeetingHistoryResponse, String> {
+    client
+        .list_meetings(limit, offset)
+        .await
+        .map_err(|_| "Meeting History is unavailable.".to_owned())
+}
+
+/// Read one full original Meeting transcript without exposing sidecar secrets.
+#[tauri::command]
+pub async fn get_meeting_detail(
+    client: State<'_, LiveTranscriptionClient>,
+    meeting_id: Uuid,
+) -> Result<MeetingDetail, String> {
+    client
+        .get_meeting_detail(meeting_id)
+        .await
+        .map_err(|_| "Meeting detail is unavailable.".to_owned())
 }
 
 #[tauri::command]

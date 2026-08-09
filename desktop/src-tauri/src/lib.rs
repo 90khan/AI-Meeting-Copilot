@@ -10,8 +10,8 @@ use audio_capture::commands::{
 };
 use live_transcription::client::{
     connect_live_transcription, create_meeting, disconnect_live_transcription,
-    end_live_transcription_session, get_live_transcription_status,
-    start_live_transcription_session, start_meeting, LiveTranscriptionClient,
+    end_live_transcription_session, get_live_transcription_status, get_meeting_detail,
+    list_meetings, start_live_transcription_session, start_meeting, LiveTranscriptionClient,
 };
 use sidecar::manager::{get_backend_status, start_backend, stop_backend, SidecarManager};
 use tauri::Manager;
@@ -36,6 +36,8 @@ pub fn run() {
             end_live_transcription_session,
             create_meeting,
             start_meeting,
+            list_meetings,
+            get_meeting_detail,
             start_live_transcription_session,
             get_audio_capture_status,
             get_capture_authorization,
