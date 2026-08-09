@@ -453,6 +453,74 @@ impl LiveTranscriptionClient {
             .map_err(|_| LiveTranscriptionClientError::ProtocolFailed)
     }
 
+    async fn get_meeting_review(
+        &self,
+        meeting_id: Uuid,
+        version: Option<u16>,
+    ) -> Result<Option<MeetingReviewArtifact>, LiveTranscriptionClientError> {
+        if version == Some(0) {
+            return Err(LiveTranscriptionClientError::ProtocolFailed);
+        }
+        let connection = self
+            .sidecar_manager
+            .live_transcription_connection()
+            .await
+            .map_err(|_| LiveTranscriptionClientError::NotConnected)?;
+        let version_query = version.map_or_else(String::new, |value| format!("?version={value}"));
+        let response = reqwest::Client::new()
+            .get(format!(
+                "http://{}:{}/api/v1/meetings/{meeting_id}/review{version_query}",
+                connection.host, connection.port
+            ))
+            .send()
+            .await
+            .map_err(|_| LiveTranscriptionClientError::ConnectionFailed)?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if response.status() != StatusCode::OK {
+            return Err(LiveTranscriptionClientError::ProtocolFailed);
+        }
+        let payload = response
+            .text()
+            .await
+            .map_err(|_| LiveTranscriptionClientError::ProtocolFailed)?;
+        serde_json::from_str::<MeetingReviewArtifact>(&payload)
+            .map(Some)
+            .map_err(|_| LiveTranscriptionClientError::ProtocolFailed)
+    }
+
+    async fn generate_meeting_review(
+        &self,
+        meeting_id: Uuid,
+        force_regenerate: bool,
+    ) -> Result<GeneratedMeetingReviewArtifact, LiveTranscriptionClientError> {
+        let connection = self
+            .sidecar_manager
+            .live_transcription_connection()
+            .await
+            .map_err(|_| LiveTranscriptionClientError::NotConnected)?;
+        let response = reqwest::Client::new()
+            .post(format!(
+                "http://{}:{}/api/v1/meetings/{meeting_id}/review",
+                connection.host, connection.port
+            ))
+            .header("content-type", "application/json")
+            .body(serde_json::json!({ "force_regenerate": force_regenerate }).to_string())
+            .send()
+            .await
+            .map_err(|_| LiveTranscriptionClientError::ConnectionFailed)?;
+        if response.status() != StatusCode::OK {
+            return Err(LiveTranscriptionClientError::ProtocolFailed);
+        }
+        let payload = response
+            .text()
+            .await
+            .map_err(|_| LiveTranscriptionClientError::ProtocolFailed)?;
+        serde_json::from_str::<GeneratedMeetingReviewArtifact>(&payload)
+            .map_err(|_| LiveTranscriptionClientError::ProtocolFailed)
+    }
+
     /// Begin one validated backend session. This remains Rust-internal until audio capture exists.
     pub(crate) async fn start_session(
         &self,
@@ -888,6 +956,87 @@ pub struct GeneratedMeetingTranslationArtifact {
     reused_existing: bool,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all(deserialize = "snake_case", serialize = "camelCase"))]
+pub struct ReviewActionItem {
+    text: String,
+    owner: Option<String>,
+    due_date: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all(deserialize = "snake_case", serialize = "camelCase"))]
+pub struct ReviewOpenQuestion {
+    question: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all(deserialize = "snake_case", serialize = "camelCase"))]
+pub struct ReviewTechnicalTerm {
+    term: String,
+    explanation: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all(deserialize = "snake_case", serialize = "camelCase"))]
+pub struct ReviewInterviewQuestion {
+    question: String,
+    answer_summary: Option<String>,
+    evaluation: Option<String>,
+    improvement_suggestion: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all(deserialize = "snake_case", serialize = "camelCase"))]
+pub struct ReviewFeedback {
+    strengths: Vec<String>,
+    improvement_areas: Vec<String>,
+    overall_feedback: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all(deserialize = "snake_case", serialize = "camelCase"))]
+pub struct MeetingReviewContent {
+    summary: String,
+    key_decisions: Vec<String>,
+    action_items: Vec<ReviewActionItem>,
+    open_questions: Vec<ReviewOpenQuestion>,
+    technical_questions: Vec<ReviewInterviewQuestion>,
+    technical_terms: Vec<ReviewTechnicalTerm>,
+    feedback: Option<ReviewFeedback>,
+}
+
+/// Safe persisted structured review content with no generation internals.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all(deserialize = "snake_case", serialize = "camelCase"))]
+pub struct MeetingReviewArtifact {
+    artifact_id: Uuid,
+    meeting_id: Uuid,
+    version: u32,
+    review_type: String,
+    status: String,
+    created_at: String,
+    completed_at: Option<String>,
+    source_transcript_count: usize,
+    content: MeetingReviewContent,
+}
+
+/// Generation response adds only whether the completed review was reused.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all(deserialize = "snake_case", serialize = "camelCase"))]
+pub struct GeneratedMeetingReviewArtifact {
+    artifact_id: Uuid,
+    meeting_id: Uuid,
+    version: u32,
+    review_type: String,
+    status: String,
+    created_at: String,
+    completed_at: Option<String>,
+    source_transcript_count: usize,
+    content: MeetingReviewContent,
+    reused_existing: bool,
+}
+
 /// Start a session with configuration fixed for its entire lifecycle.
 #[tauri::command]
 pub async fn start_live_transcription_session(
@@ -977,6 +1126,32 @@ pub async fn generate_meeting_translation(
         .generate_meeting_translation(meeting_id, force_regenerate)
         .await
         .map_err(|_| "Translation is temporarily unavailable.".to_owned())
+}
+
+/// Return an existing completed Meeting review, if one is available.
+#[tauri::command]
+pub async fn get_meeting_review(
+    client: State<'_, LiveTranscriptionClient>,
+    meeting_id: Uuid,
+    version: Option<u16>,
+) -> Result<Option<MeetingReviewArtifact>, String> {
+    client
+        .get_meeting_review(meeting_id, version)
+        .await
+        .map_err(|_| "Review is temporarily unavailable.".to_owned())
+}
+
+/// Generate or explicitly regenerate one completed Meeting review artifact.
+#[tauri::command]
+pub async fn generate_meeting_review(
+    client: State<'_, LiveTranscriptionClient>,
+    meeting_id: Uuid,
+    force_regenerate: bool,
+) -> Result<GeneratedMeetingReviewArtifact, String> {
+    client
+        .generate_meeting_review(meeting_id, force_regenerate)
+        .await
+        .map_err(|_| "Review is temporarily unavailable.".to_owned())
 }
 
 #[tauri::command]
@@ -1333,8 +1508,8 @@ mod tests {
     use super::{
         clear_disconnected, dispatch_message, fail_pending_operations, mark_failed_state,
         validate_chunk_admission, ActiveSession, ClientState, LiveTranscriptionClientError,
-        LiveTranscriptionLifecycleStatus, LiveTranscriptionStatus, MeetingTranslationArtifact,
-        PendingChunk, PendingEnd, PendingStart,
+        LiveTranscriptionLifecycleStatus, LiveTranscriptionStatus, MeetingReviewArtifact,
+        MeetingTranslationArtifact, PendingChunk, PendingEnd, PendingStart,
     };
     use crate::{
         assist_mode::events::{
@@ -1508,6 +1683,35 @@ mod tests {
         let serialized = serde_json::to_string(&artifact).expect("public payload serializes");
 
         assert!(serialized.contains("transcriptId"));
+        assert!(!serialized.contains("provider"));
+        assert!(!serialized.contains("prompt"));
+        assert!(!serialized.contains("failure"));
+    }
+
+    #[test]
+    fn review_payload_reads_nested_public_content_without_generation_metadata() {
+        let artifact = serde_json::from_str::<MeetingReviewArtifact>(
+            r#"{
+                "artifact_id":"00000000-0000-0000-0000-000000000002",
+                "meeting_id":"00000000-0000-0000-0000-000000000001",
+                "version":1,
+                "review_type":"interview_review",
+                "status":"completed",
+                "created_at":"2026-01-01T00:00:00+00:00",
+                "completed_at":"2026-01-01T00:01:00+00:00",
+                "source_transcript_count":0,
+                "content":{
+                    "summary":"Summary.","key_decisions":[],"action_items":[],
+                    "open_questions":[],"technical_questions":[],"technical_terms":[],
+                    "feedback":null
+                }
+            }"#,
+        )
+        .expect("backend review payload parses");
+        let serialized = serde_json::to_string(&artifact).expect("review serializes");
+
+        assert!(serialized.contains("reviewType"));
+        assert!(serialized.contains("keyDecisions"));
         assert!(!serialized.contains("provider"));
         assert!(!serialized.contains("prompt"));
         assert!(!serialized.contains("failure"));

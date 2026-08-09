@@ -180,6 +180,18 @@ textarea {
   color: #254b83;
 }
 
+.meeting-review { display: grid; gap: 0.75rem; margin-top: 1.5rem; }
+.review-header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+.review-header h4, .review-section h5 { margin: 0; }
+.review-status { min-height: 1.3rem; margin: 0; color: #4c5b75; font-size: 0.9rem; }
+.review-content { display: grid; gap: 0.75rem; max-height: 34rem; overflow-y: auto; }
+.review-section { padding: 0.85rem 1rem; border: 1px solid #d9e0ec; border-radius: 0.5rem; background: #fbfcfe; }
+.review-section p { margin: 0.45rem 0 0; white-space: pre-wrap; }
+.review-section ul { display: grid; gap: 0.4rem; margin: 0.6rem 0 0; padding-left: 1.25rem; }
+.review-section h5 + h5 { margin-top: 0.9rem; }
+.review-cards { display: grid; gap: 0.6rem; margin-top: 0.6rem; }
+.review-card { padding: 0.75rem; border: 1px solid #e5eaf2; border-radius: 0.4rem; background: #fff; }
+
 .meeting-transcript {
   display: grid;
   max-height: 34rem;
