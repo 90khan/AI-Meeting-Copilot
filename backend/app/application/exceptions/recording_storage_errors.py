@@ -14,6 +14,10 @@ class RecordingStorageUnavailableError(RecordingStorageError):
     DEFAULT_MESSAGE = "Recording storage is unavailable."
 
 
+class RecordingPlaybackUnavailableError(RecordingStorageError):
+    DEFAULT_MESSAGE = "Recording playback is unavailable."
+
+
 class RecordingSegmentTooLargeError(RecordingStorageError):
     DEFAULT_MESSAGE = "Recording segment exceeds the configured limit."
 

@@ -13,6 +13,10 @@ from app.application.dto.recordings.encryption import (
     RecordingEncryptionKey,
     RecordingKeyReference,
 )
+from app.application.dto.recordings.playback import (
+    RecordingPlaybackInfo,
+    RecordingPlaybackSegment,
+)
 from app.application.dto.recordings.recording import (
     RecordingDeletionStatus,
     RecordingMetadata,
@@ -49,6 +53,8 @@ __all__ = [
     "RecordingKeyReference",
     "RecordingMetadata",
     "RecordingMetadataRecord",
+    "RecordingPlaybackInfo",
+    "RecordingPlaybackSegment",
     "RecordingRetentionPolicy",
     "RecordingSegmentDescriptor",
     "RecordingState",

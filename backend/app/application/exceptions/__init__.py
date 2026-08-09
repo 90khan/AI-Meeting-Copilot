@@ -16,6 +16,7 @@ from app.application.exceptions.recording_key_errors import (
     RecordingKeyUnavailableError,
 )
 from app.application.exceptions.recording_storage_errors import (
+    RecordingPlaybackUnavailableError,
     RecordingSegmentAuthenticationError,
     RecordingSegmentCorruptError,
     RecordingSegmentLifecycleError,
@@ -39,6 +40,7 @@ __all__ = [
     "RecordingKeyNotFoundError",
     "RecordingKeyStoreError",
     "RecordingKeyUnavailableError",
+    "RecordingPlaybackUnavailableError",
     "RecordingSegmentAuthenticationError",
     "RecordingSegmentCorruptError",
     "RecordingSegmentLifecycleError",

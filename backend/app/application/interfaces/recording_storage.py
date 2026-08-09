@@ -27,6 +27,13 @@ class RecordingStorage(Protocol):
         self, recording_id: UUID
     ) -> tuple[RecordingSegmentDescriptor, ...]: ...
 
+    async def read_segment(
+        self,
+        recording_id: UUID,
+        segment_index: int,
+        key_reference: RecordingKeyReference,
+    ) -> bytes: ...
+
     async def delete_recording(self, recording_id: UUID) -> None: ...
 
     async def recording_exists(self, recording_id: UUID) -> bool: ...
