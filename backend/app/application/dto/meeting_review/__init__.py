@@ -2,6 +2,16 @@
 
 from app.application.dto.meeting_review.meeting_detail import MeetingDetail
 from app.application.dto.meeting_review.meeting_history import MeetingHistoryItem
+from app.application.dto.meeting_review.review_artifact import (
+    MeetingReviewArtifact,
+    MeetingReviewArtifactStatus,
+    MeetingReviewContent,
+    ReviewActionItem,
+    ReviewFeedback,
+    ReviewInterviewQuestion,
+    ReviewOpenQuestion,
+    ReviewTechnicalTerm,
+)
 from app.application.dto.meeting_review.transcript_read import TranscriptReadItem
 from app.application.dto.meeting_review.translation_artifact import (
     MeetingTranslationArtifact,
@@ -24,7 +34,15 @@ __all__ = [
     "GetMeetingTranslationResult",
     "MeetingDetail",
     "MeetingHistoryItem",
+    "MeetingReviewArtifact",
+    "MeetingReviewArtifactStatus",
+    "MeetingReviewContent",
     "MeetingTranslationArtifact",
+    "ReviewActionItem",
+    "ReviewFeedback",
+    "ReviewInterviewQuestion",
+    "ReviewOpenQuestion",
+    "ReviewTechnicalTerm",
     "TranscriptReadItem",
     "TranslationArtifactSegment",
     "TranslationArtifactStatus",
