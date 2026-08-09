@@ -1,6 +1,8 @@
-"""Generate an in-memory, versioned Turkish Meeting translation artifact."""
+"""Generate and persist versioned Turkish Meeting translation artifacts."""
 
+import asyncio
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import datetime
 from uuid import UUID
 
@@ -13,6 +15,7 @@ from app.application.dto.meeting_review import (
     TranslationArtifactSegment,
     TranslationArtifactStatus,
 )
+from app.application.exceptions import ProviderError
 from app.application.interfaces import TranslationProvider, UnitOfWorkFactory
 from app.domain.exceptions import InvalidStateTransitionError
 from app.domain.value_objects import MeetingStatus
@@ -22,7 +25,7 @@ _TARGET_LANGUAGE = LanguageCode(value="tr")
 
 
 class GenerateMeetingTranslationUseCase:
-    """Translate a complete ended Meeting transcript without persistence effects."""
+    """Persist a short-lived artifact lifecycle around sequential translation work."""
 
     def __init__(
         self,
@@ -76,28 +79,101 @@ class GenerateMeetingTranslationUseCase:
                 command.meeting_id,
                 target_language=str(_TARGET_LANGUAGE),
             )
-            segments = await self._translate_segments(detail)
-            completed_at = self._utc_clock()
-            artifact = MeetingTranslationArtifact(
+            processing = MeetingTranslationArtifact(
                 artifact_id=self._uuid_factory(),
                 meeting_id=command.meeting_id,
                 version=(latest_version or 0) + 1,
                 target_language=str(_TARGET_LANGUAGE),
-                status=TranslationArtifactStatus.COMPLETED,
-                created_at=completed_at,
-                completed_at=completed_at,
+                status=TranslationArtifactStatus.PROCESSING,
+                created_at=self._utc_clock(),
+                completed_at=None,
                 source_transcript_count=len(detail.transcript),
-                segments=segments,
+                segments=(),
                 provider_name=self._provider_name,
                 model_name=self._model_name,
                 prompt_version=self._prompt_version,
                 schema_version=self._schema_version,
                 failure_code=None,
             )
-            return GenerateMeetingTranslationResult(
-                artifact=artifact,
-                reused_existing=False,
+
+        await self._persist_new_artifact(processing)
+
+        try:
+            segments = await self._translate_segments(detail)
+        except ProviderError:
+            await self._persist_terminal_artifact(
+                artifact_id=processing.artifact_id,
+                status=TranslationArtifactStatus.FAILED,
+                segments=(),
+                failure_code="translation_provider_failed",
             )
+            raise
+        except asyncio.CancelledError:
+            await self._best_effort_persist_cancelled(processing.artifact_id)
+            raise
+
+        artifact = await self._persist_terminal_artifact(
+            artifact_id=processing.artifact_id,
+            status=TranslationArtifactStatus.COMPLETED,
+            segments=segments,
+            failure_code=None,
+        )
+        return GenerateMeetingTranslationResult(
+            artifact=artifact,
+            reused_existing=False,
+        )
+
+    async def _persist_new_artifact(
+        self,
+        artifact: MeetingTranslationArtifact,
+    ) -> None:
+        """Persist the processing state in its own short transaction."""
+
+        async with self._unit_of_work_factory() as unit_of_work:
+            await unit_of_work.meeting_translations.save(artifact)
+            await unit_of_work.commit()
+
+    async def _persist_terminal_artifact(
+        self,
+        *,
+        artifact_id: UUID,
+        status: TranslationArtifactStatus,
+        segments: tuple[TranslationArtifactSegment, ...],
+        failure_code: str | None,
+    ) -> MeetingTranslationArtifact:
+        """Reload and replace the processing artifact in a fresh transaction."""
+
+        async with self._unit_of_work_factory() as unit_of_work:
+            processing = await unit_of_work.meeting_translations.get_by_id(artifact_id)
+            if processing is None:
+                raise LookupError("Translation artifact not found")
+            artifact = replace(
+                processing,
+                status=status,
+                completed_at=(
+                    self._utc_clock()
+                    if status is TranslationArtifactStatus.COMPLETED
+                    else None
+                ),
+                segments=segments,
+                failure_code=failure_code,
+            )
+            await unit_of_work.meeting_translations.save(artifact)
+            await unit_of_work.commit()
+            return artifact
+
+    async def _best_effort_persist_cancelled(self, artifact_id: UUID) -> None:
+        """Persist cancellation when possible without masking cancellation itself."""
+
+        try:
+            await self._persist_terminal_artifact(
+                artifact_id=artifact_id,
+                status=TranslationArtifactStatus.CANCELLED,
+                segments=(),
+                failure_code="translation_cancelled",
+            )
+        except Exception:
+            return
 
     async def _translate_segments(
         self,
