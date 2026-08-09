@@ -9,6 +9,10 @@ use tokio::sync::Mutex;
 use super::{
     authorization::{MicrophoneAuthorizationState, ScreenCaptureAuthorizationState},
     coordinator::{AudioCaptureCoordinator, AudioCaptureCoordinatorError},
+    recording_writer::{
+        RecordingConfiguration, RecordingFailureCode, RecordingRetentionPolicy,
+        RecordingSegmentWriter, RecordingWriter, SidecarRecordingBackendClient,
+    },
     sources::{CaptureDisplaySource, CaptureMicrophoneSource},
     status::AudioCaptureStatus,
     swift_bridge::SwiftAudioCaptureBridge,
@@ -57,6 +61,16 @@ pub(crate) struct StartAudioCaptureInput {
     include_system_audio: bool,
     include_microphone: bool,
     exclude_current_process_audio: bool,
+    #[serde(default)]
+    recording: RecordingCaptureInput,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RecordingCaptureInput {
+    enabled: bool,
+    consent_confirmed_at: Option<String>,
+    retention_policy: Option<RecordingRetentionPolicy>,
 }
 
 #[tauri::command]
@@ -145,15 +159,62 @@ pub(crate) async fn start_audio_capture(
     )
     .map_err(|_| GENERIC_START_FAILURE.to_owned())?;
 
-    let mut coordinator = capture.coordinator.lock().await;
-    validate_start_preconditions(&mut coordinator, &configuration)?;
-    coordinator
-        .start(
-            &configuration,
-            Arc::new(live_transcription_client.inner().clone()),
-        )
-        .await
-        .map_err(map_start_error)
+    {
+        let mut coordinator = capture.coordinator.lock().await;
+        validate_start_preconditions(&mut coordinator, &configuration)?;
+    }
+
+    let (recording_writer, recording_unavailable) = prepare_recording_branch(
+        &input.recording,
+        sidecar_manager.inner().clone(),
+        live_transcription_client.inner().clone(),
+    )
+    .await;
+
+    let result = {
+        let mut coordinator = capture.coordinator.lock().await;
+        coordinator
+            .start_with_recording(
+                &configuration,
+                Arc::new(live_transcription_client.inner().clone()),
+                recording_writer.clone(),
+                recording_unavailable,
+            )
+            .await
+    };
+    if result.is_err() {
+        if let Some(writer) = recording_writer {
+            writer.abort(RecordingFailureCode::CaptureFailed).await;
+        }
+    }
+    result.map_err(map_start_error)
+}
+
+async fn prepare_recording_branch(
+    input: &RecordingCaptureInput,
+    sidecar: SidecarManager,
+    live_transcription_client: LiveTranscriptionClient,
+) -> (Option<Arc<dyn RecordingSegmentWriter>>, bool) {
+    if !input.enabled {
+        return (None, false);
+    }
+    let Some(meeting_id) = live_transcription_client.active_meeting_id().await else {
+        return (None, true);
+    };
+    let writer = Arc::new(RecordingWriter::new(Arc::new(
+        SidecarRecordingBackendClient::new(sidecar),
+    )));
+    let configuration = RecordingConfiguration {
+        enabled: true,
+        consent_confirmed_at: input.consent_confirmed_at.clone(),
+        retention_policy: input
+            .retention_policy
+            .unwrap_or(RecordingRetentionPolicy::SevenDays),
+    };
+    match writer.prepare_and_start(meeting_id, configuration).await {
+        Ok(true) => (Some(writer), false),
+        Ok(false) | Err(_) => (None, true),
+    }
 }
 
 #[tauri::command]

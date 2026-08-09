@@ -87,6 +87,7 @@ pub(crate) struct ChunkSubmissionResult {
 
 struct ActiveSession {
     session_id: Uuid,
+    meeting_id: Uuid,
     expected_sequence: u64,
     in_flight: bool,
     anchor_monotonic_seconds: f64,
@@ -572,6 +573,7 @@ impl LiveTranscriptionClient {
                 state.status = LiveTranscriptionLifecycleStatus::SessionActive;
                 state.session = Some(ActiveSession {
                     session_id: started.session_id,
+                    meeting_id,
                     expected_sequence: started.expected_sequence,
                     in_flight: false,
                     anchor_monotonic_seconds: 0.0,
@@ -589,6 +591,14 @@ impl LiveTranscriptionClient {
                 Err(error)
             }
         }
+    }
+
+    /// Return the active Meeting identity only to trusted local capture code.
+    pub(crate) async fn active_meeting_id(&self) -> Option<Uuid> {
+        let state = self.state.lock().await;
+        (state.status == LiveTranscriptionLifecycleStatus::SessionActive)
+            .then_some(())
+            .and_then(|_| state.session.as_ref().map(|session| session.meeting_id))
     }
 
     /// Send exactly one finalized WAV chunk and wait for its terminal result.
@@ -1605,6 +1615,7 @@ mod tests {
             max_binary_payload_bytes: 10,
             session: Some(ActiveSession {
                 session_id,
+                meeting_id: Uuid::nil(),
                 expected_sequence: 2,
                 in_flight: false,
                 anchor_monotonic_seconds: 0.0,

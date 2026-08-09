@@ -9,26 +9,37 @@ use thiserror::Error;
 use tokio::{
     sync::{mpsc, Notify},
     task::JoinHandle,
+    time::{timeout, Duration},
 };
 
 use super::{
     bridge::{NativeAudioCaptureBridge, NativeAudioFrameSender},
     chunker::AudioChunker,
     processing::AudioFrameProcessor,
+    recording_chunker::RecordingAudioChunker,
+    recording_writer::{EncodedRecordingSegment, RecordingFailureCode, RecordingSegmentWriter},
     sender::{ChunkSenderTask, ChunkSubmitter, FinalizedChunkQueue},
     status::{AudioCaptureState, AudioCaptureStatus},
     types::{AudioCaptureConfiguration, NativeAudioFrame},
-    wav::encode_audio_chunk,
+    wav::{build_wav_from_samples, encode_audio_chunk},
 };
 
 const NATIVE_FRAME_BUFFER_CAPACITY: usize = 8;
 const GAP_MESSAGE: &str = "An audio chunk was dropped because transcription fell behind.";
 const SUBMISSION_FAILURE_MESSAGE: &str = "Audio submission failed.";
+const RECORDING_UNAVAILABLE_MESSAGE: &str = "Recording is unavailable.";
 
 struct ProcessingPipeline {
     processor: AudioFrameProcessor,
     chunker: AudioChunker,
     submission_gap: bool,
+    recording: Option<RecordingBranch>,
+    recording_unavailable: bool,
+}
+
+struct RecordingBranch {
+    chunker: RecordingAudioChunker,
+    writer: Arc<dyn RecordingSegmentWriter>,
 }
 
 impl Default for ProcessingPipeline {
@@ -37,6 +48,8 @@ impl Default for ProcessingPipeline {
             processor: AudioFrameProcessor::default(),
             chunker: AudioChunker::default(),
             submission_gap: false,
+            recording: None,
+            recording_unavailable: false,
         }
     }
 }
@@ -46,6 +59,8 @@ impl ProcessingPipeline {
         self.processor.reset();
         self.chunker.reset();
         self.submission_gap = false;
+        self.recording = None;
+        self.recording_unavailable = false;
     }
 }
 
@@ -86,6 +101,18 @@ impl<B: NativeAudioCaptureBridge> AudioCaptureCoordinator<B> {
         configuration: &AudioCaptureConfiguration,
         submitter: Arc<dyn ChunkSubmitter>,
     ) -> Result<AudioCaptureStatus, AudioCaptureCoordinatorError> {
+        self.start_with_recording(configuration, submitter, None, false)
+            .await
+    }
+
+    /// Starts transcription and, when prepared, an independent recording branch.
+    pub(crate) async fn start_with_recording(
+        &mut self,
+        configuration: &AudioCaptureConfiguration,
+        submitter: Arc<dyn ChunkSubmitter>,
+        recording_writer: Option<Arc<dyn RecordingSegmentWriter>>,
+        recording_unavailable: bool,
+    ) -> Result<AudioCaptureStatus, AudioCaptureCoordinatorError> {
         if !matches!(
             self.state,
             AudioCaptureState::Stopped | AudioCaptureState::Failed
@@ -98,10 +125,15 @@ impl<B: NativeAudioCaptureBridge> AudioCaptureCoordinator<B> {
         self.state = AudioCaptureState::Starting;
         self.processing_failed.store(false, Ordering::Release);
         self.stopping.store(false, Ordering::Release);
-        self.pipeline
-            .lock()
-            .expect("processing pipeline lock")
-            .reset();
+        {
+            let mut pipeline = self.pipeline.lock().expect("processing pipeline lock");
+            pipeline.reset();
+            pipeline.recording = recording_writer.map(|writer| RecordingBranch {
+                chunker: RecordingAudioChunker::default(),
+                writer,
+            });
+            pipeline.recording_unavailable = recording_unavailable;
+        }
         let (sender_task, finalized_queue) = ChunkSenderTask::start(submitter);
         let (sender, receiver) = mpsc::channel(NATIVE_FRAME_BUFFER_CAPACITY);
 
@@ -144,9 +176,14 @@ impl<B: NativeAudioCaptureBridge> AudioCaptureCoordinator<B> {
         self.state = AudioCaptureState::Stopping;
         self.stopping.store(true, Ordering::Release);
         let native_stop = self.bridge.stop();
-        if let Some(task) = self.processing_task.take() {
-            task.abort();
-            let _ = task.await;
+        if let Some(mut task) = self.processing_task.take() {
+            if timeout(Duration::from_millis(250), &mut task)
+                .await
+                .is_err()
+            {
+                task.abort();
+                let _ = task.await;
+            }
         }
         if let Some(queue) = self.finalized_queue.take() {
             queue.close();
@@ -154,6 +191,13 @@ impl<B: NativeAudioCaptureBridge> AudioCaptureCoordinator<B> {
         }
         if let Some(sender_task) = self.sender_task.take() {
             sender_task.stop().await;
+        }
+        if let Some((writer, failed)) = finalize_recording_branch(&self.pipeline) {
+            if failed {
+                writer.abort(RecordingFailureCode::FinalizationFailed).await;
+            } else {
+                let _ = writer.finalize().await;
+            }
         }
         self.pipeline
             .lock()
@@ -172,6 +216,13 @@ impl<B: NativeAudioCaptureBridge> AudioCaptureCoordinator<B> {
         self.observe_sender_failure();
         let message = if self.state == AudioCaptureState::Failed {
             Some(SUBMISSION_FAILURE_MESSAGE.to_owned())
+        } else if self
+            .pipeline
+            .lock()
+            .expect("processing pipeline lock")
+            .recording_unavailable
+        {
+            Some(RECORDING_UNAVAILABLE_MESSAGE.to_owned())
         } else if self
             .pipeline
             .lock()
@@ -206,10 +257,9 @@ impl<B: NativeAudioCaptureBridge> AudioCaptureCoordinator<B> {
         if let Some(queue) = &self.finalized_queue {
             queue.clear();
         }
-        self.pipeline
-            .lock()
-            .expect("processing pipeline lock")
-            .reset();
+        let mut pipeline = self.pipeline.lock().expect("processing pipeline lock");
+        fail_recording_branch(&mut pipeline);
+        pipeline.reset();
         self.state = AudioCaptureState::Failed;
     }
 }
@@ -263,6 +313,7 @@ fn process_native_frame(
         .process(native_frame)
         .map_err(|_| AudioCaptureCoordinatorError::ProcessingFailed)?;
     for frame in frames {
+        process_recording_frame(&mut pipeline, &frame);
         let result = pipeline
             .chunker
             .push(frame)
@@ -279,6 +330,89 @@ fn process_native_frame(
         }
     }
     Ok(())
+}
+
+fn process_recording_frame(
+    pipeline: &mut ProcessingPipeline,
+    frame: &super::mixer::MixedAudioFrame,
+) {
+    let Some(branch) = pipeline.recording.as_mut() else {
+        return;
+    };
+    let result = branch
+        .chunker
+        .push(frame.capture_time_seconds, &frame.samples);
+    let Ok(result) = result else {
+        fail_recording_branch(pipeline);
+        return;
+    };
+    if result.gap_detected {
+        branch.writer.set_has_gaps(true);
+    }
+    for chunk in result.chunks {
+        let wav_bytes = match build_wav_from_samples(&chunk.samples) {
+            Ok(wav_bytes) => wav_bytes,
+            Err(_) => {
+                fail_recording_branch(pipeline);
+                return;
+            }
+        };
+        let segment = match EncodedRecordingSegment::new(
+            chunk.segment_index,
+            wav_bytes,
+            chunk.sample_count,
+        ) {
+            Ok(segment) => segment,
+            Err(_) => {
+                fail_recording_branch(pipeline);
+                return;
+            }
+        };
+        if branch.writer.try_enqueue(segment).is_err() {
+            fail_recording_branch(pipeline);
+            return;
+        }
+    }
+}
+
+fn fail_recording_branch(pipeline: &mut ProcessingPipeline) {
+    let Some(branch) = pipeline.recording.take() else {
+        return;
+    };
+    pipeline.recording_unavailable = true;
+    tokio::spawn(async move {
+        branch
+            .writer
+            .abort(RecordingFailureCode::WriterFailed)
+            .await;
+    });
+}
+
+fn finalize_recording_branch(
+    pipeline: &Arc<Mutex<ProcessingPipeline>>,
+) -> Option<(Arc<dyn RecordingSegmentWriter>, bool)> {
+    let mut pipeline = pipeline.lock().expect("processing pipeline lock");
+    let mut branch = pipeline.recording.take()?;
+    let mut failed = false;
+    if let Some(chunk) = branch.chunker.flush_final() {
+        let result = build_wav_from_samples(&chunk.samples).and_then(|wav_bytes| {
+            EncodedRecordingSegment::new(chunk.segment_index, wav_bytes, chunk.sample_count)
+                .map_err(|_| super::pcm16::AudioEncodingError::InvalidChunk)
+        });
+        match result {
+            Ok(segment) => {
+                if branch.writer.try_enqueue(segment).is_err() {
+                    pipeline.recording_unavailable = true;
+                    failed = true;
+                }
+            }
+            Err(_) => {
+                pipeline.recording_unavailable = true;
+                failed = true;
+            }
+        }
+    }
+    Some((branch.writer, failed))
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -317,6 +451,10 @@ mod tests {
         audio_capture::{
             bridge::{
                 NativeAudioCaptureBridge, NativeAudioCaptureBridgeError, NativeAudioFrameSender,
+            },
+            recording_writer::{
+                EncodedRecordingSegment, RecordingFailureCode, RecordingFuture,
+                RecordingSegmentWriter, RecordingWriterError,
             },
             sender::ChunkSubmitter,
             status::{AudioCaptureState, AudioCaptureStatus},
@@ -385,6 +523,53 @@ mod tests {
 
     struct FailingSubmitter;
 
+    struct FakeRecordingWriter {
+        segments: Arc<Mutex<Vec<(u32, usize, Vec<u8>)>>>,
+        finalized: Arc<Mutex<usize>>,
+        aborted: Arc<Mutex<usize>>,
+        fail_enqueue: bool,
+    }
+
+    impl RecordingSegmentWriter for FakeRecordingWriter {
+        fn try_enqueue(
+            &self,
+            segment: EncodedRecordingSegment,
+        ) -> Result<(), RecordingWriterError> {
+            if self.fail_enqueue {
+                return Err(RecordingWriterError::Unavailable);
+            }
+            self.segments
+                .lock()
+                .expect("recording segments lock")
+                .push((
+                    segment.segment_index,
+                    segment.sample_count,
+                    segment.wav_bytes,
+                ));
+            Ok(())
+        }
+
+        fn set_has_gaps(&self, _has_gaps: bool) {}
+
+        fn finalize<'a>(&'a self) -> RecordingFuture<'a, ()> {
+            let finalized = Arc::clone(&self.finalized);
+            Box::pin(async move {
+                *finalized.lock().expect("finalized lock") += 1;
+                Ok(())
+            })
+        }
+
+        fn abort<'a>(
+            &'a self,
+            _failure_code: RecordingFailureCode,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+            let aborted = Arc::clone(&self.aborted);
+            Box::pin(async move {
+                *aborted.lock().expect("aborted lock") += 1;
+            })
+        }
+    }
+
     impl ChunkSubmitter for FailingSubmitter {
         fn submit(
             &self,
@@ -438,13 +623,35 @@ mod tests {
     }
 
     fn native_frame(sample_count: usize) -> NativeAudioFrame {
+        native_frame_at(sample_count, 0.0)
+    }
+
+    fn native_frame_at(sample_count: usize, capture_time_seconds: f64) -> NativeAudioFrame {
         NativeAudioFrame::new(
             NativeAudioSource::SystemAudio,
             NativeAudioFormat::new(16_000, 1, NativeSampleFormat::Float32, true).expect("format"),
-            0.0,
+            capture_time_seconds,
             NativeAudioSamples::Float32(vec![0.0; sample_count]),
         )
         .expect("frame")
+    }
+
+    fn recording_writer(
+        fail_enqueue: bool,
+    ) -> (
+        Arc<FakeRecordingWriter>,
+        Arc<Mutex<Vec<(u32, usize, Vec<u8>)>>>,
+    ) {
+        let segments = Arc::new(Mutex::new(Vec::new()));
+        (
+            Arc::new(FakeRecordingWriter {
+                segments: Arc::clone(&segments),
+                finalized: Arc::new(Mutex::new(0)),
+                aborted: Arc::new(Mutex::new(0)),
+                fail_enqueue,
+            }),
+            segments,
+        )
     }
 
     #[tokio::test]
@@ -578,5 +785,95 @@ mod tests {
         let status = coordinator.status().expect("privacy-safe status");
         assert_eq!(status.message(), Some("Audio submission failed."));
         coordinator.stop().await.expect("stops failed capture");
+    }
+
+    #[tokio::test]
+    async fn recording_branch_writes_zero_overlap_segments_and_flushes_the_short_tail() {
+        let (bridge, sender) = bridge();
+        let mut coordinator = AudioCaptureCoordinator::new(bridge);
+        let submitted = Arc::new(Mutex::new(Vec::new()));
+        let (writer, segments) = recording_writer(false);
+        let recording_branch: Arc<dyn RecordingSegmentWriter> = writer;
+        coordinator
+            .start_with_recording(
+                &AudioCaptureConfiguration::default(),
+                Arc::new(RecordingSubmitter {
+                    sequences: Arc::clone(&submitted),
+                }),
+                Some(recording_branch),
+                false,
+            )
+            .await
+            .expect("starts");
+        sender
+            .lock()
+            .expect("fake bridge lock")
+            .as_ref()
+            .expect("worker sender")
+            .try_send(native_frame(160_001))
+            .expect("callback remains non-blocking");
+        sender
+            .lock()
+            .expect("fake bridge lock")
+            .as_ref()
+            .expect("worker sender")
+            .try_send(native_frame_at(1, 160_001.0 / 16_000.0))
+            .expect("second callback remains non-blocking");
+
+        coordinator.stop().await.expect("stops and flushes");
+        let segments = segments.lock().expect("recording segments lock");
+        assert_eq!(
+            segments
+                .iter()
+                .map(|(index, count, _)| (*index, *count))
+                .collect::<Vec<_>>(),
+            vec![(0, 80_000), (1, 80_000), (2, 1)]
+        );
+        assert!(segments
+            .iter()
+            .all(|(_, _, wav)| wav.starts_with(b"RIFF") && wav.get(8..12) == Some(b"WAVE")));
+        assert!(!submitted.lock().expect("submitter lock").is_empty());
+    }
+
+    #[tokio::test]
+    async fn recording_failure_does_not_stop_transcription() {
+        let (bridge, sender) = bridge();
+        let mut coordinator = AudioCaptureCoordinator::new(bridge);
+        let submitted = Arc::new(Mutex::new(Vec::new()));
+        let (writer, _) = recording_writer(true);
+        let recording_branch: Arc<dyn RecordingSegmentWriter> = writer;
+        coordinator
+            .start_with_recording(
+                &AudioCaptureConfiguration::default(),
+                Arc::new(RecordingSubmitter {
+                    sequences: Arc::clone(&submitted),
+                }),
+                Some(recording_branch),
+                false,
+            )
+            .await
+            .expect("starts");
+        sender
+            .lock()
+            .expect("fake bridge lock")
+            .as_ref()
+            .expect("worker sender")
+            .try_send(native_frame(80_001))
+            .expect("callback remains non-blocking");
+        timeout(Duration::from_secs(1), async {
+            loop {
+                if !submitted.lock().expect("submitter lock").is_empty() {
+                    return;
+                }
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("transcription continues");
+        assert_eq!(
+            coordinator.status().expect("status").message(),
+            Some("Recording is unavailable.")
+        );
+        coordinator.stop().await.expect("stops");
     }
 }

@@ -10,6 +10,7 @@ pub(crate) mod coordinator;
 pub(crate) mod mixer;
 pub(crate) mod pcm16;
 pub(crate) mod processing;
+pub(crate) mod recording_chunker;
 pub(crate) mod recording_writer;
 pub(crate) mod resampler;
 pub(crate) mod sender;

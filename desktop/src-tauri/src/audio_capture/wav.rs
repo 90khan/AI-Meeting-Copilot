@@ -22,7 +22,12 @@ pub(crate) fn build_wav_bytes(chunk: &AudioChunk) -> Result<Vec<u8>, AudioEncodi
     {
         return Err(AudioEncodingError::InvalidChunk);
     }
-    let pcm = pcm16_to_le_bytes(&float_to_pcm16(&chunk.samples)?)?;
+    build_wav_from_samples(&chunk.samples)
+}
+
+/// Build the same V1 PCM16 WAV contract from canonical mono samples.
+pub(crate) fn build_wav_from_samples(samples: &[f32]) -> Result<Vec<u8>, AudioEncodingError> {
+    let pcm = pcm16_to_le_bytes(&float_to_pcm16(samples)?)?;
     let data_len = u32::try_from(pcm.len()).map_err(|_| AudioEncodingError::InvalidChunk)?;
     let mut wav = Vec::with_capacity(HEADER_BYTES + pcm.len());
     wav.extend_from_slice(b"RIFF");

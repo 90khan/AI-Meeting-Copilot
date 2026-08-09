@@ -50,7 +50,8 @@ impl RecordingConfiguration {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum RecordingRetentionPolicy {
     OneDay,
     SevenDays,
@@ -141,7 +142,7 @@ pub(crate) enum RecordingWriterError {
     SegmentRejected,
 }
 
-type RecordingFuture<'a, T> =
+pub(crate) type RecordingFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, RecordingWriterError>> + Send + 'a>>;
 
 /// Trusted, fakeable sidecar boundary. Implementations retain connection secrets.
@@ -165,6 +166,17 @@ pub(crate) trait RecordingBackendClient: Send + Sync + 'static {
         has_gaps: bool,
     ) -> RecordingFuture<'a, ()>;
     fn fail<'a>(&'a self, recording_id: Uuid, failure_code: &'a str) -> RecordingFuture<'a, ()>;
+}
+
+/// Object-safe recording branch boundary held by the capture coordinator.
+pub(crate) trait RecordingSegmentWriter: Send + Sync {
+    fn try_enqueue(&self, segment: EncodedRecordingSegment) -> Result<(), RecordingWriterError>;
+    fn set_has_gaps(&self, has_gaps: bool);
+    fn finalize<'a>(&'a self) -> RecordingFuture<'a, ()>;
+    fn abort<'a>(
+        &'a self,
+        failure_code: RecordingFailureCode,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -623,6 +635,27 @@ impl<C: RecordingBackendClient> RecordingWriter<C> {
 
     fn reset_idle(&self) {
         *self.state.lock().expect("recording writer state lock") = WriterState::default();
+    }
+}
+
+impl<C: RecordingBackendClient> RecordingSegmentWriter for RecordingWriter<C> {
+    fn try_enqueue(&self, segment: EncodedRecordingSegment) -> Result<(), RecordingWriterError> {
+        Self::try_enqueue(self, segment)
+    }
+
+    fn set_has_gaps(&self, has_gaps: bool) {
+        Self::set_has_gaps(self, has_gaps);
+    }
+
+    fn finalize<'a>(&'a self) -> RecordingFuture<'a, ()> {
+        Box::pin(async move { Self::finalize(self).await })
+    }
+
+    fn abort<'a>(
+        &'a self,
+        failure_code: RecordingFailureCode,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move { Self::abort(self, failure_code).await })
     }
 }
 
