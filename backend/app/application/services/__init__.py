@@ -6,6 +6,8 @@ from app.application.services.assist_mode_orchestrator import (
     AssistModeOrchestrator,
     AssistUpdateSink,
 )
+from app.application.services.meeting_review_batcher import MeetingReviewBatcher
+from app.application.services.meeting_review_merger import MeetingReviewMerger
 from app.application.services.recent_transcript_context import RecentTranscriptContext
 from app.application.services.recording_deletion_state import (
     mark_deleted,
@@ -26,6 +28,8 @@ __all__ = [
     "AssistModeLifecycleState",
     "AssistModeOrchestrator",
     "AssistUpdateSink",
+    "MeetingReviewBatcher",
+    "MeetingReviewMerger",
     "RecentTranscriptContext",
     "RecordingRetentionCleanupService",
     "RecordingStorageReconciler",

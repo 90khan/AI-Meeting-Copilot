@@ -12,6 +12,10 @@ from app.application.dto.meeting_review.review_artifact import (
     ReviewOpenQuestion,
     ReviewTechnicalTerm,
 )
+from app.application.dto.meeting_review.review_batch import (
+    BatchReviewResult,
+    TranscriptReviewBatch,
+)
 from app.application.dto.meeting_review.transcript_read import TranscriptReadItem
 from app.application.dto.meeting_review.translation_artifact import (
     MeetingTranslationArtifact,
@@ -28,6 +32,7 @@ from app.application.dto.meeting_review.translation_read import (
 )
 
 __all__ = [
+    "BatchReviewResult",
     "GenerateMeetingTranslationCommand",
     "GenerateMeetingTranslationResult",
     "GetMeetingTranslationQuery",
@@ -44,6 +49,7 @@ __all__ = [
     "ReviewOpenQuestion",
     "ReviewTechnicalTerm",
     "TranscriptReadItem",
+    "TranscriptReviewBatch",
     "TranslationArtifactSegment",
     "TranslationArtifactStatus",
 ]
