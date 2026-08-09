@@ -5,6 +5,7 @@ import platform
 from collections.abc import Callable
 from contextlib import suppress
 from datetime import UTC, datetime
+from uuid import uuid4
 
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
@@ -41,8 +42,10 @@ from app.application.use_cases import (
     CreateMeetingUseCase,
     DeleteMeetingAudioUseCase,
     EndMeetingUseCase,
+    GenerateMeetingTranslationUseCase,
     GenerateReplySuggestionsUseCase,
     GetMeetingDetailUseCase,
+    GetMeetingTranslationUseCase,
     ListMeetingsUseCase,
     ProcessLiveAudioChunkUseCase,
     ReconcileRecordingStorageUseCase,
@@ -407,6 +410,29 @@ class Container:
 
         self._require_session_factory()
         return GetMeetingDetailUseCase(self.get_unit_of_work)
+
+    def get_generate_meeting_translation_use_case(
+        self,
+    ) -> GenerateMeetingTranslationUseCase:
+        """Create one lifecycle-bound Turkish Meeting translation generator."""
+
+        self._require_started()
+        return GenerateMeetingTranslationUseCase(
+            unit_of_work_factory=self.get_unit_of_work,
+            translation_provider=self.get_translation_provider(),
+            utc_clock=_utc_now,
+            uuid_factory=uuid4,
+            provider_name=self._settings.translation_provider,
+            model_name=self._settings.ollama_translation_model,
+            prompt_version="meeting_translation_v1",
+            schema_version=1,
+        )
+
+    def get_get_meeting_translation_use_case(self) -> GetMeetingTranslationUseCase:
+        """Create one completed-artifact-only Meeting translation reader."""
+
+        self._require_session_factory()
+        return GetMeetingTranslationUseCase(self.get_unit_of_work)
 
     def get_add_transcript_use_case(self) -> AddTranscriptUseCase:
         """Create a Unit-of-Work-backed transcript addition use case."""

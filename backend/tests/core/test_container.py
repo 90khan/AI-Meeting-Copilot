@@ -4,11 +4,13 @@ import asyncio
 
 import pytest
 from app.application.dto import AudioSource
-from app.application.dto.ai import LanguageCode
+from app.application.dto.ai import LanguageCode, TranslationRequest, TranslationResult
 from app.application.use_cases import (
     AddTranscriptUseCase,
     CreateMeetingUseCase,
     EndMeetingUseCase,
+    GenerateMeetingTranslationUseCase,
+    GetMeetingTranslationUseCase,
     ProcessLiveAudioChunkUseCase,
     RenameMeetingUseCase,
     StartLiveTranscriptionSessionUseCase,
@@ -18,6 +20,21 @@ from app.core.config import Settings
 from app.core.container import Container
 from app.domain.value_objects import MeetingId
 from app.infrastructure.audio import BufferedLiveTranscriptionSession
+
+
+class _FakeTranslationProvider:
+    """Translation fake that records whether startup or factories invoke it."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def translate(self, request: TranslationRequest) -> TranslationResult:
+        self.calls += 1
+        return TranslationResult(
+            translated_text=request.text,
+            source_language=request.source_language or LanguageCode(value="de"),
+            target_language=request.target_language,
+        )
 
 
 def test_start_creates_an_engine_and_session_factory() -> None:
@@ -127,6 +144,10 @@ def test_use_case_factories_return_working_use_cases_after_start() -> None:
         container.get_start_live_transcription_session_use_case(),
         StartLiveTranscriptionSessionUseCase,
     )
+    assert isinstance(
+        container.get_get_meeting_translation_use_case(),
+        GetMeetingTranslationUseCase,
+    )
 
     asyncio.run(container.stop())
 
@@ -158,6 +179,50 @@ def test_use_case_factories_raise_before_start() -> None:
         container.get_rename_meeting_use_case()
     with pytest.raises(RuntimeError, match="has not been started"):
         container.get_end_meeting_use_case()
+    with pytest.raises(RuntimeError, match="has not been started"):
+        container.get_generate_meeting_translation_use_case()
+    with pytest.raises(RuntimeError, match="has not been started"):
+        container.get_get_meeting_translation_use_case()
+
+
+def test_translation_factories_are_fresh_and_do_not_call_provider_at_startup() -> None:
+    """Translation composition stays lazy and injects stable generation metadata."""
+
+    providers: list[_FakeTranslationProvider] = []
+    container = Container(
+        Settings(
+            database_url="sqlite+pysqlite:///:memory:",
+            translation_provider="test-local",
+            ollama_translation_model="translation-model",
+        )
+    )
+
+    def factory() -> _FakeTranslationProvider:
+        provider = _FakeTranslationProvider()
+        providers.append(provider)
+        return provider
+
+    container.register_translation_provider_factory(factory)
+    asyncio.run(container.start())
+
+    try:
+        assert providers == []
+        first_generator = container.get_generate_meeting_translation_use_case()
+        second_generator = container.get_generate_meeting_translation_use_case()
+        first_reader = container.get_get_meeting_translation_use_case()
+        second_reader = container.get_get_meeting_translation_use_case()
+
+        assert first_generator is not second_generator
+        assert isinstance(first_generator, GenerateMeetingTranslationUseCase)
+        assert first_reader is not second_reader
+        assert len(providers) == 2
+        assert all(provider.calls == 0 for provider in providers)
+        assert first_generator._provider_name == "test-local"
+        assert first_generator._model_name == "translation-model"
+        assert first_generator._prompt_version == "meeting_translation_v1"
+        assert first_generator._schema_version == 1
+    finally:
+        asyncio.run(container.stop())
 
 
 def test_live_audio_chunk_factory_works_with_registered_speech_provider() -> None:

@@ -4,7 +4,6 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from uuid import UUID
 
-import pytest
 from app.api.routes import meeting_translation
 from app.application.dto.meeting_review import (
     GenerateMeetingTranslationResult,
@@ -13,6 +12,7 @@ from app.application.dto.meeting_review import (
     TranslationArtifactStatus,
 )
 from app.application.exceptions import ProviderError
+from app.application.use_cases import GetMeetingTranslationUseCase
 from app.domain.value_objects import MeetingId
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -114,25 +114,27 @@ class _Generate:
         return self.result
 
 
-def _client(artifact: MeetingTranslationArtifact | None) -> TestClient:
+def _client(
+    artifact: MeetingTranslationArtifact | None,
+    generator: _Generate | None = None,
+) -> TestClient:
     app = FastAPI()
     app.include_router(meeting_translation.router)
     app.state.container = SimpleNamespace(
-        get_unit_of_work=lambda: _UnitOfWork(artifact),
+        get_generate_meeting_translation_use_case=lambda: generator,
+        get_get_meeting_translation_use_case=lambda: GetMeetingTranslationUseCase(
+            lambda: _UnitOfWork(artifact)
+        ),
     )
     return TestClient(app)
 
 
-def test_post_returns_safe_generated_artifact_and_preserves_segment_order(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_post_returns_safe_generated_artifact_and_preserves_segment_order() -> None:
     artifact = _artifact()
     generator = _Generate(
         GenerateMeetingTranslationResult(artifact=artifact, reused_existing=False)
     )
-    monkeypatch.setattr(meeting_translation, "_generate_use_case", lambda _: generator)
-
-    response = _client(artifact).post(
+    response = _client(artifact, generator).post(
         f"/api/v1/meetings/{_MEETING_ID}/translation",
         json={"force_regenerate": False},
     )
@@ -152,16 +154,12 @@ def test_post_returns_safe_generated_artifact_and_preserves_segment_order(
     _assert_no_internal_fields(body)
 
 
-def test_post_supports_reuse_force_and_zero_transcript_artifacts(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_post_supports_reuse_force_and_zero_transcript_artifacts() -> None:
     artifact = _artifact(version=4, empty=True)
     generator = _Generate(
         GenerateMeetingTranslationResult(artifact=artifact, reused_existing=True)
     )
-    monkeypatch.setattr(meeting_translation, "_generate_use_case", lambda _: generator)
-
-    response = _client(artifact).post(
+    response = _client(artifact, generator).post(
         f"/api/v1/meetings/{_MEETING_ID}/translation",
         json={"force_regenerate": True},
     )
@@ -172,13 +170,10 @@ def test_post_supports_reuse_force_and_zero_transcript_artifacts(
     assert generator.commands[0].force_regenerate is True
 
 
-def test_post_maps_provider_failure_to_generic_response(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_post_maps_provider_failure_to_generic_response() -> None:
     generator = _Generate(error=ProviderError("private provider response"))
-    monkeypatch.setattr(meeting_translation, "_generate_use_case", lambda _: generator)
 
-    response = _client(None).post(
+    response = _client(None, generator).post(
         f"/api/v1/meetings/{_MEETING_ID}/translation",
         json={},
     )

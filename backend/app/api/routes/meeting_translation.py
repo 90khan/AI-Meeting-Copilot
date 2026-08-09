@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime
 from typing import cast
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict
@@ -13,10 +13,6 @@ from app.application.dto.meeting_review import (
     MeetingTranslationArtifact,
 )
 from app.application.exceptions import ApplicationValidationError, ProviderError
-from app.application.use_cases import (
-    GenerateMeetingTranslationUseCase,
-    GetMeetingTranslationUseCase,
-)
 from app.core.container import Container
 from app.domain.value_objects import MeetingId
 
@@ -67,7 +63,8 @@ async def generate_meeting_translation(
     """Generate a translation while exposing only safe artifact fields."""
 
     try:
-        result = await _generate_use_case(request).execute(
+        use_case = _container(request).get_generate_meeting_translation_use_case()
+        result = await use_case.execute(
             GenerateMeetingTranslationCommand(
                 meeting_id=MeetingId(meeting_id),
                 force_regenerate=payload.force_regenerate,
@@ -104,9 +101,8 @@ async def get_meeting_translation(
     """Return only a completed translation artifact version."""
 
     try:
-        result = await GetMeetingTranslationUseCase(
-            _container(request).get_unit_of_work
-        ).execute(
+        use_case = _container(request).get_get_meeting_translation_use_case()
+        result = await use_case.execute(
             GetMeetingTranslationQuery(
                 meeting_id=MeetingId(meeting_id),
                 version=version,
@@ -151,29 +147,6 @@ def _artifact_response(
             for segment in artifact.segments
         ],
     )
-
-
-def _generate_use_case(request: Request) -> GenerateMeetingTranslationUseCase:
-    """Compose generation from existing lifecycle-managed container dependencies."""
-
-    container = _container(request)
-    settings = container.get_settings()
-    return GenerateMeetingTranslationUseCase(
-        unit_of_work_factory=container.get_unit_of_work,
-        translation_provider=container.get_translation_provider(),
-        utc_clock=_utc_now,
-        uuid_factory=uuid4,
-        provider_name=settings.translation_provider,
-        model_name=settings.ollama_translation_model,
-        prompt_version="meeting_translation_v1",
-        schema_version=1,
-    )
-
-
-def _utc_now() -> datetime:
-    """Return the current timezone-aware UTC timestamp."""
-
-    return datetime.now(UTC)
 
 
 def _utc_isoformat(value: datetime) -> str:
