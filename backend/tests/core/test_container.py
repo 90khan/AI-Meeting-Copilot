@@ -9,7 +9,9 @@ from app.application.use_cases import (
     AddTranscriptUseCase,
     CreateMeetingUseCase,
     EndMeetingUseCase,
+    GenerateMeetingReviewUseCase,
     GenerateMeetingTranslationUseCase,
+    GetMeetingReviewUseCase,
     GetMeetingTranslationUseCase,
     ProcessLiveAudioChunkUseCase,
     RenameMeetingUseCase,
@@ -148,6 +150,10 @@ def test_use_case_factories_return_working_use_cases_after_start() -> None:
         container.get_get_meeting_translation_use_case(),
         GetMeetingTranslationUseCase,
     )
+    assert isinstance(
+        container.get_get_meeting_review_use_case(),
+        GetMeetingReviewUseCase,
+    )
 
     asyncio.run(container.stop())
 
@@ -183,6 +189,10 @@ def test_use_case_factories_raise_before_start() -> None:
         container.get_generate_meeting_translation_use_case()
     with pytest.raises(RuntimeError, match="has not been started"):
         container.get_get_meeting_translation_use_case()
+    with pytest.raises(RuntimeError, match="has not been started"):
+        container.get_generate_meeting_review_use_case()
+    with pytest.raises(RuntimeError, match="has not been started"):
+        container.get_get_meeting_review_use_case()
 
 
 def test_translation_factories_are_fresh_and_do_not_call_provider_at_startup() -> None:
@@ -221,6 +231,39 @@ def test_translation_factories_are_fresh_and_do_not_call_provider_at_startup() -
         assert first_generator._model_name == "translation-model"
         assert first_generator._prompt_version == "meeting_translation_v1"
         assert first_generator._schema_version == 1
+    finally:
+        asyncio.run(container.stop())
+
+
+def test_review_factories_are_fresh_lazy_and_inject_stable_metadata() -> None:
+    """Review composition reuses one lazy local client without startup generation."""
+
+    container = Container(
+        Settings(
+            database_url="sqlite+pysqlite:///:memory:",
+            ollama_meeting_summarization_model="review-model",
+        )
+    )
+    asyncio.run(container.start())
+
+    try:
+        assert container._ollama_client is None
+        assert container._ollama_meeting_review_generation_provider is None
+
+        first_generator = container.get_generate_meeting_review_use_case()
+        second_generator = container.get_generate_meeting_review_use_case()
+        first_reader = container.get_get_meeting_review_use_case()
+        second_reader = container.get_get_meeting_review_use_case()
+
+        assert isinstance(first_generator, GenerateMeetingReviewUseCase)
+        assert first_generator is not second_generator
+        assert isinstance(first_reader, GetMeetingReviewUseCase)
+        assert first_reader is not second_reader
+        assert first_generator._provider_name == "ollama"
+        assert first_generator._model_name == "review-model"
+        assert first_generator._prompt_version == "meeting_review_workflow_v1"
+        assert first_generator._schema_version == 1
+        assert container._ollama_client is not None
     finally:
         asyncio.run(container.stop())
 

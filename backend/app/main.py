@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from app.api.routes.health import router as health_router
 from app.api.routes.live_transcription import router as live_transcription_router
 from app.api.routes.meeting_history import router as meeting_history_router
+from app.api.routes.meeting_review import router as meeting_review_router
 from app.api.routes.meeting_translation import router as meeting_translation_router
 from app.api.routes.meetings import router as meetings_router
 from app.core.config import Settings, get_settings
@@ -45,5 +46,6 @@ def create_app(
     app.include_router(live_transcription_router)
     app.include_router(meetings_router)
     app.include_router(meeting_history_router)
+    app.include_router(meeting_review_router)
     app.include_router(meeting_translation_router)
     return app

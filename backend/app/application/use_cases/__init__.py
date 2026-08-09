@@ -15,6 +15,7 @@ from app.application.use_cases.generate_reply_suggestions import (
     GenerateReplySuggestionsUseCase,
 )
 from app.application.use_cases.get_meeting_detail import GetMeetingDetailUseCase
+from app.application.use_cases.get_meeting_review import GetMeetingReviewUseCase
 from app.application.use_cases.get_meeting_translation import (
     GetMeetingTranslationUseCase,
 )
@@ -53,6 +54,7 @@ __all__ = [
     "GenerateMeetingTranslationUseCase",
     "GenerateReplySuggestionsUseCase",
     "GetMeetingDetailUseCase",
+    "GetMeetingReviewUseCase",
     "GetMeetingTranslationUseCase",
     "ListMeetingsUseCase",
     "MarkRecordingFailedUseCase",

@@ -33,6 +33,8 @@ from app.application.services import (
     AssistModeConfiguration,
     AssistModeOrchestrator,
     AssistUpdateSink,
+    MeetingReviewBatcher,
+    MeetingReviewMerger,
     RecordingRetentionCleanupService,
     RecordingStorageReconciler,
     TranscriptDeduplicator,
@@ -42,9 +44,11 @@ from app.application.use_cases import (
     CreateMeetingUseCase,
     DeleteMeetingAudioUseCase,
     EndMeetingUseCase,
+    GenerateMeetingReviewUseCase,
     GenerateMeetingTranslationUseCase,
     GenerateReplySuggestionsUseCase,
     GetMeetingDetailUseCase,
+    GetMeetingReviewUseCase,
     GetMeetingTranslationUseCase,
     ListMeetingsUseCase,
     ProcessLiveAudioChunkUseCase,
@@ -74,6 +78,7 @@ from app.infrastructure.providers.faster_whisper import (
 from app.infrastructure.providers.ollama import (
     OllamaClient,
     OllamaGermanSimplificationProvider,
+    OllamaMeetingReviewGenerationProvider,
     OllamaMeetingSummarizationProvider,
     OllamaReplyCoachingProvider,
     OllamaTranslationProvider,
@@ -123,6 +128,9 @@ class Container:
         self._ollama_reply_coaching_provider: ReplyCoachingProvider | None = None
         self._ollama_meeting_summarization_provider: (
             MeetingSummarizationProvider | None
+        ) = None
+        self._ollama_meeting_review_generation_provider: (
+            OllamaMeetingReviewGenerationProvider | None
         ) = None
         self._sidecar_token_validator: SidecarTokenValidator | None = None
         self._recording_key_store: RecordingKeyStore | None = None
@@ -434,6 +442,36 @@ class Container:
         self._require_session_factory()
         return GetMeetingTranslationUseCase(self.get_unit_of_work)
 
+    def get_generate_meeting_review_use_case(self) -> GenerateMeetingReviewUseCase:
+        """Create one lifecycle-bound versioned Meeting review generator."""
+
+        self._require_started()
+        provider = self._ollama_meeting_review_generation_provider
+        if provider is None:
+            provider = OllamaMeetingReviewGenerationProvider(
+                client=self._get_or_create_ollama_client(),
+                model=self._settings.ollama_meeting_summarization_model,
+            )
+            self._ollama_meeting_review_generation_provider = provider
+        return GenerateMeetingReviewUseCase(
+            unit_of_work_factory=self.get_unit_of_work,
+            meeting_review_generation_provider=provider,
+            meeting_review_batcher=MeetingReviewBatcher(max_batch_characters=12_000),
+            meeting_review_merger=MeetingReviewMerger(),
+            utc_clock=_utc_now,
+            uuid_factory=uuid4,
+            provider_name="ollama",
+            model_name=self._settings.ollama_meeting_summarization_model,
+            prompt_version="meeting_review_workflow_v1",
+            schema_version=1,
+        )
+
+    def get_get_meeting_review_use_case(self) -> GetMeetingReviewUseCase:
+        """Create one completed-artifact-only Meeting review reader."""
+
+        self._require_started()
+        return GetMeetingReviewUseCase(self.get_unit_of_work)
+
     def get_add_transcript_use_case(self) -> AddTranscriptUseCase:
         """Create a Unit-of-Work-backed transcript addition use case."""
 
@@ -641,14 +679,7 @@ class Container:
         if not automatic_capabilities:
             return
 
-        client = OllamaClient(
-            base_url=self._settings.ollama_base_url,
-            request_timeout_seconds=self._settings.ollama_request_timeout_seconds,
-            temperature=self._settings.ollama_temperature,
-            context_length=self._settings.ollama_context_length,
-            keep_alive=self._settings.ollama_keep_alive,
-        )
-        self._ollama_client = client
+        client = self._get_or_create_ollama_client()
 
         if self._translation_provider_factory is None and (
             self._settings.translation_provider == "ollama"
@@ -713,7 +744,23 @@ class Container:
             self._ollama_german_simplification_provider = None
             self._ollama_reply_coaching_provider = None
             self._ollama_meeting_summarization_provider = None
+            self._ollama_meeting_review_generation_provider = None
             self._ollama_client = None
+
+    def _get_or_create_ollama_client(self) -> OllamaClient:
+        """Return one lifecycle-owned client without making a network request."""
+
+        client = self._ollama_client
+        if client is None:
+            client = OllamaClient(
+                base_url=self._settings.ollama_base_url,
+                request_timeout_seconds=self._settings.ollama_request_timeout_seconds,
+                temperature=self._settings.ollama_temperature,
+                context_length=self._settings.ollama_context_length,
+                keep_alive=self._settings.ollama_keep_alive,
+            )
+            self._ollama_client = client
+        return client
 
     def _dispose_persistence_resources(self) -> None:
         """Dispose persistence resources without affecting provider registrations."""
