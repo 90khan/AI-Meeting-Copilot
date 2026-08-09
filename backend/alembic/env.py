@@ -5,7 +5,10 @@ from logging.config import fileConfig
 from alembic import context
 from app.core.config import get_settings
 from app.infrastructure.database.base import Base
-from app.infrastructure.persistence.sqlalchemy.models import MeetingModel, TranscriptEntryModel
+from app.infrastructure.persistence.sqlalchemy.models import (
+    MeetingModel,
+    TranscriptEntryModel,
+)
 from app.infrastructure.persistence.sqlalchemy.models.meeting_translation_artifact_model import (
     MeetingTranslationArtifactModel,
 )
