@@ -60,6 +60,42 @@ def test_initial_migration_upgrades_and_downgrades_sqlite(
                 constraint["column_names"] == ["meeting_id", "sequence"]
                 for constraint in inspector.get_unique_constraints("transcript_entries")
             )
+
+            assert {
+                column["name"]
+                for column in inspector.get_columns("meeting_translation_artifacts")
+            } == {
+                "artifact_id",
+                "meeting_id",
+                "version",
+                "target_language",
+                "status",
+                "created_at",
+                "completed_at",
+                "source_transcript_count",
+                "segments",
+                "provider_name",
+                "model_name",
+                "prompt_version",
+                "schema_version",
+                "failure_code",
+            }
+            assert any(
+                constraint["column_names"]
+                == ["meeting_id", "target_language", "version"]
+                for constraint in inspector.get_unique_constraints(
+                    "meeting_translation_artifacts"
+                )
+            )
+            assert {
+                index["name"]
+                for index in inspector.get_indexes("meeting_translation_artifacts")
+            } == {
+                "ix_meeting_translation_artifacts_meeting_id",
+                "ix_meeting_translation_artifacts_meeting_language",
+                "ix_meeting_translation_artifacts_status",
+                "ix_meeting_translation_artifacts_created_at",
+            }
         finally:
             engine.dispose()
 

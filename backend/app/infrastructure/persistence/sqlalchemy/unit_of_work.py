@@ -6,6 +6,9 @@ from typing import Self
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.application.interfaces.meeting_review_repository import MeetingReviewRepository
+from app.application.interfaces.meeting_translation_repository import (
+    MeetingTranslationRepository,
+)
 from app.application.interfaces.recording_repository import RecordingRepository
 from app.domain.repositories import MeetingRepository
 from app.infrastructure.persistence.sqlalchemy.meeting_repository import (
@@ -13,6 +16,9 @@ from app.infrastructure.persistence.sqlalchemy.meeting_repository import (
 )
 from app.infrastructure.persistence.sqlalchemy.meeting_review_repository import (
     SQLAlchemyMeetingReviewRepository,
+)
+from app.infrastructure.persistence.sqlalchemy.meeting_translation_repository import (
+    SQLAlchemyMeetingTranslationRepository,
 )
 from app.infrastructure.persistence.sqlalchemy.recording_repository import (
     SQLAlchemyRecordingRepository,
@@ -30,6 +36,7 @@ class SQLAlchemyUnitOfWork:
         self._meetings: SQLAlchemyMeetingRepository | None = None
         self._recordings: SQLAlchemyRecordingRepository | None = None
         self._meeting_reviews: SQLAlchemyMeetingReviewRepository | None = None
+        self._meeting_translations: SQLAlchemyMeetingTranslationRepository | None = None
 
     @property
     def meetings(self) -> MeetingRepository:
@@ -55,6 +62,14 @@ class SQLAlchemyUnitOfWork:
         return self._meeting_reviews
 
     @property
+    def meeting_translations(self) -> MeetingTranslationRepository:
+        """Return the active Meeting translation artifact repository."""
+
+        if self._meeting_translations is None:
+            raise RuntimeError("Unit of Work is not active.")
+        return self._meeting_translations
+
+    @property
     def session(self) -> Session:
         """Return the active SQLAlchemy session."""
 
@@ -71,6 +86,7 @@ class SQLAlchemyUnitOfWork:
         self._meetings = SQLAlchemyMeetingRepository(session)
         self._recordings = SQLAlchemyRecordingRepository(session)
         self._meeting_reviews = SQLAlchemyMeetingReviewRepository(session)
+        self._meeting_translations = SQLAlchemyMeetingTranslationRepository(session)
         return self
 
     async def __aexit__(
@@ -90,6 +106,7 @@ class SQLAlchemyUnitOfWork:
             self._meetings = None
             self._recordings = None
             self._meeting_reviews = None
+            self._meeting_translations = None
             self._session = None
 
     async def commit(self) -> None:

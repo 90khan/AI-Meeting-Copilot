@@ -6,6 +6,9 @@ from types import TracebackType
 from typing import Protocol, Self
 
 from app.application.interfaces.meeting_review_repository import MeetingReviewRepository
+from app.application.interfaces.meeting_translation_repository import (
+    MeetingTranslationRepository,
+)
 from app.application.interfaces.recording_repository import RecordingRepository
 from app.domain.repositories import MeetingRepository
 
@@ -28,6 +31,12 @@ class UnitOfWork(Protocol):
     @property
     def meeting_reviews(self) -> MeetingReviewRepository:
         """Return the read-only Meeting review query repository."""
+
+        ...
+
+    @property
+    def meeting_translations(self) -> MeetingTranslationRepository:
+        """Return Meeting translation artifact persistence for this work unit."""
 
         ...
 

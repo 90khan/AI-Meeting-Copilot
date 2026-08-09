@@ -5,9 +5,9 @@ from logging.config import fileConfig
 from alembic import context
 from app.core.config import get_settings
 from app.infrastructure.database.base import Base
-from app.infrastructure.persistence.sqlalchemy.models import (
-    MeetingModel,
-    TranscriptEntryModel,
+from app.infrastructure.persistence.sqlalchemy.models import MeetingModel, TranscriptEntryModel
+from app.infrastructure.persistence.sqlalchemy.models.meeting_translation_artifact_model import (
+    MeetingTranslationArtifactModel,
 )
 from sqlalchemy import engine_from_config, pool
 
@@ -17,7 +17,7 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 target_metadata = Base.metadata
-ORM_MODELS = (MeetingModel, TranscriptEntryModel)
+ORM_MODELS = (MeetingModel, TranscriptEntryModel, MeetingTranslationArtifactModel)
 
 
 def _database_url() -> str:

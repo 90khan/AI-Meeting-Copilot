@@ -9,8 +9,11 @@ from app.infrastructure.persistence.sqlalchemy.models.transcript_entry_model imp
     TranscriptEntryModel,
 )
 
+from .meeting_translation_artifact_model import MeetingTranslationArtifactModel
+
 __all__ = [
     "MeetingModel",
+    "MeetingTranslationArtifactModel",
     "RecordingMetadataModel",
     "TimestampMixin",
     "TranscriptEntryModel",
