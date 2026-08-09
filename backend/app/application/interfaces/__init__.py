@@ -13,6 +13,7 @@ from app.application.interfaces.ai import (
     TranslationProviderFactory,
 )
 from app.application.interfaces.live_transcription import LiveTranscriptionSession
+from app.application.interfaces.meeting_review_repository import MeetingReviewRepository
 from app.application.interfaces.recording_key_store import RecordingKeyStore
 from app.application.interfaces.recording_repository import RecordingRepository
 from app.application.interfaces.recording_storage import (
@@ -26,6 +27,7 @@ __all__ = [
     "GermanSimplificationProvider",
     "GermanSimplificationProviderFactory",
     "LiveTranscriptionSession",
+    "MeetingReviewRepository",
     "MeetingSummarizationProvider",
     "MeetingSummarizationProviderFactory",
     "RecordingKeyStore",

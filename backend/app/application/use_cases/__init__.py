@@ -8,6 +8,8 @@ from app.application.use_cases.finalize_recording import FinalizeRecordingUseCas
 from app.application.use_cases.generate_reply_suggestions import (
     GenerateReplySuggestionsUseCase,
 )
+from app.application.use_cases.get_meeting_detail import GetMeetingDetailUseCase
+from app.application.use_cases.list_meetings import ListMeetingsUseCase
 from app.application.use_cases.mark_recording_failed import MarkRecordingFailedUseCase
 from app.application.use_cases.mark_recording_started import MarkRecordingStartedUseCase
 from app.application.use_cases.prepare_recording_session import (
@@ -39,6 +41,8 @@ __all__ = [
     "EndMeetingUseCase",
     "FinalizeRecordingUseCase",
     "GenerateReplySuggestionsUseCase",
+    "GetMeetingDetailUseCase",
+    "ListMeetingsUseCase",
     "MarkRecordingFailedUseCase",
     "MarkRecordingStartedUseCase",
     "PrepareRecordingSessionUseCase",

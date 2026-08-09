@@ -5,10 +5,14 @@ from typing import Self
 
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.application.interfaces.meeting_review_repository import MeetingReviewRepository
 from app.application.interfaces.recording_repository import RecordingRepository
 from app.domain.repositories import MeetingRepository
 from app.infrastructure.persistence.sqlalchemy.meeting_repository import (
     SQLAlchemyMeetingRepository,
+)
+from app.infrastructure.persistence.sqlalchemy.meeting_review_repository import (
+    SQLAlchemyMeetingReviewRepository,
 )
 from app.infrastructure.persistence.sqlalchemy.recording_repository import (
     SQLAlchemyRecordingRepository,
@@ -25,6 +29,7 @@ class SQLAlchemyUnitOfWork:
         self._session: Session | None = None
         self._meetings: SQLAlchemyMeetingRepository | None = None
         self._recordings: SQLAlchemyRecordingRepository | None = None
+        self._meeting_reviews: SQLAlchemyMeetingReviewRepository | None = None
 
     @property
     def meetings(self) -> MeetingRepository:
@@ -44,6 +49,12 @@ class SQLAlchemyUnitOfWork:
         return self._recordings
 
     @property
+    def meeting_reviews(self) -> MeetingReviewRepository:
+        if self._meeting_reviews is None:
+            raise RuntimeError("Unit of Work is not active.")
+        return self._meeting_reviews
+
+    @property
     def session(self) -> Session:
         """Return the active SQLAlchemy session."""
 
@@ -59,6 +70,7 @@ class SQLAlchemyUnitOfWork:
         self._session = session
         self._meetings = SQLAlchemyMeetingRepository(session)
         self._recordings = SQLAlchemyRecordingRepository(session)
+        self._meeting_reviews = SQLAlchemyMeetingReviewRepository(session)
         return self
 
     async def __aexit__(
@@ -77,6 +89,7 @@ class SQLAlchemyUnitOfWork:
             session.close()
             self._meetings = None
             self._recordings = None
+            self._meeting_reviews = None
             self._session = None
 
     async def commit(self) -> None:

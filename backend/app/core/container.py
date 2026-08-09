@@ -42,6 +42,8 @@ from app.application.use_cases import (
     DeleteMeetingAudioUseCase,
     EndMeetingUseCase,
     GenerateReplySuggestionsUseCase,
+    GetMeetingDetailUseCase,
+    ListMeetingsUseCase,
     ProcessLiveAudioChunkUseCase,
     ReconcileRecordingStorageUseCase,
     RenameMeetingUseCase,
@@ -393,6 +395,18 @@ class Container:
 
         self._require_session_factory()
         return CreateMeetingUseCase(self.get_unit_of_work)
+
+    def get_list_meetings_use_case(self) -> ListMeetingsUseCase:
+        """Create a read-only Meeting history use case."""
+
+        self._require_session_factory()
+        return ListMeetingsUseCase(self.get_unit_of_work)
+
+    def get_get_meeting_detail_use_case(self) -> GetMeetingDetailUseCase:
+        """Create a read-only full Meeting transcript use case."""
+
+        self._require_session_factory()
+        return GetMeetingDetailUseCase(self.get_unit_of_work)
 
     def get_add_transcript_use_case(self) -> AddTranscriptUseCase:
         """Create a Unit-of-Work-backed transcript addition use case."""
