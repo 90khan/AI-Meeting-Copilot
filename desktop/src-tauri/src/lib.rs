@@ -1,6 +1,7 @@
 mod assist_mode;
 mod audio_capture;
 mod live_transcription;
+mod recording_playback;
 mod sidecar;
 
 use audio_capture::commands::{
@@ -14,6 +15,10 @@ use live_transcription::client::{
     get_live_transcription_status, get_meeting_detail, get_meeting_review, get_meeting_translation,
     list_meetings, start_live_transcription_session, start_meeting, LiveTranscriptionClient,
 };
+use recording_playback::manager::{
+    get_recording_playback_info, get_recording_playback_status, prepare_recording_playback,
+    stop_recording_playback, RecordingPlaybackManager,
+};
 use sidecar::manager::{get_backend_status, start_backend, stop_backend, SidecarManager};
 use tauri::Manager;
 
@@ -21,11 +26,13 @@ use tauri::Manager;
 pub fn run() {
     let sidecar_manager = SidecarManager::new();
     let live_transcription_client = LiveTranscriptionClient::new(sidecar_manager.clone());
+    let playback_manager = RecordingPlaybackManager::new(sidecar_manager.clone());
     let audio_capture_coordinator =
         ManagedAudioCaptureCoordinator::new().expect("audio capture bridge is unavailable");
     let app = tauri::Builder::default()
         .manage(sidecar_manager)
         .manage(live_transcription_client.clone())
+        .manage(playback_manager)
         .manage(audio_capture_coordinator)
         .invoke_handler(tauri::generate_handler![
             start_backend,
@@ -51,6 +58,10 @@ pub fn run() {
             list_capture_microphones,
             start_audio_capture,
             stop_audio_capture,
+            get_recording_playback_info,
+            prepare_recording_playback,
+            stop_recording_playback,
+            get_recording_playback_status,
         ])
         .build(tauri::generate_context!())
         .expect("error while running the Tauri application");
@@ -61,6 +72,11 @@ pub fn run() {
 
     app.run(|app_handle, event| {
         if matches!(event, tauri::RunEvent::ExitRequested { .. }) {
+            let playback = app_handle
+                .state::<RecordingPlaybackManager>()
+                .inner()
+                .clone();
+            tauri::async_runtime::block_on(playback.stop());
             let capture = app_handle.state::<ManagedAudioCaptureCoordinator>().inner();
             tauri::async_runtime::block_on(capture.stop());
             let live_transcription_client = app_handle
