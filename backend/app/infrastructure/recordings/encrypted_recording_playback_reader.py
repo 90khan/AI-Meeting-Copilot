@@ -17,6 +17,9 @@ from app.application.exceptions import (
 )
 from app.application.interfaces import RecordingKeyStore, RecordingStorage
 from app.domain.value_objects import MeetingId
+from app.infrastructure.recordings.wav_recording_segment import (
+    validate_wav_recording_segment,
+)
 
 
 class EncryptedRecordingPlaybackReader:
@@ -42,6 +45,8 @@ class EncryptedRecordingPlaybackReader:
 
         record = await self._resolve_record(meeting_id)
         metadata = record.metadata
+        if not metadata.container_format.is_playback_supported:
+            raise RecordingPlaybackUnavailableError()
         return RecordingPlaybackInfo(
             recording_id=metadata.recording_id,
             meeting_id=metadata.meeting_id,
@@ -59,6 +64,8 @@ class EncryptedRecordingPlaybackReader:
 
         record = await self._resolve_record(meeting_id)
         reference = RecordingKeyReference(value=record.key_reference)
+        if not record.metadata.container_format.is_playback_supported:
+            raise RecordingPlaybackUnavailableError()
         try:
             await self._recording_key_store.get_key(reference)
             descriptors = await self._recording_storage.list_segments(
@@ -80,6 +87,7 @@ class EncryptedRecordingPlaybackReader:
                     descriptor.segment_index,
                     reference,
                 )
+                validate_wav_recording_segment(plaintext)
             except asyncio.CancelledError:
                 raise
             except (RecordingKeyStoreError, RecordingStorageError) as error:
@@ -102,6 +110,7 @@ class EncryptedRecordingPlaybackReader:
             or metadata.state is not RecordingState.COMPLETED
             or metadata.deletion_status.value == "deleted"
             or not metadata.consent_confirmed
+            or not metadata.container_format.is_playback_supported
         ):
             raise RecordingPlaybackUnavailableError()
         return record

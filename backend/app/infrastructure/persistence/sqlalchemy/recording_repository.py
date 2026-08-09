@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.application.dto.recordings import (
     RecordingDeletionStatus,
+    RecordingMediaFormat,
     RecordingMetadata,
     RecordingMetadataRecord,
     RecordingRetentionPolicy,
@@ -134,7 +135,7 @@ class SQLAlchemyRecordingRepository(RecordingRepository):
                 deletion_status=RecordingDeletionStatus(model.deletion_status),
                 deleted_at=cls._normalize_optional_utc(model.deleted_at),
                 encryption_format_version=model.encryption_format_version,
-                container_format=model.container_format,
+                container_format=RecordingMediaFormat(model.container_format),
                 segment_count=model.segment_count,
                 has_gaps=model.has_gaps,
             ),

@@ -34,6 +34,25 @@ class RecordingDeletionStatus(StrEnum):
     FAILED = "failed"
 
 
+class RecordingMediaFormat(StrEnum):
+    """Versioned media contracts for encrypted recording plaintext segments."""
+
+    LEGACY_M4A = "m4a"
+    WAV_PCM16_MONO_16KHZ_SEGMENTED_V1 = "wav_pcm16_mono_16khz_segmented_v1"
+
+    @property
+    def is_playback_supported(self) -> bool:
+        """Whether this format has a verified V1 playback contract."""
+
+        return self is self.WAV_PCM16_MONO_16KHZ_SEGMENTED_V1
+
+
+# Playback segments use independent five-second WAV files.  They never reuse
+# the overlapping two-second transcription chunks, which would duplicate audio.
+RECORDING_SEGMENT_DURATION_SECONDS = 5.0
+RECORDING_SEGMENT_OVERLAP_SECONDS = 0.0
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class RecordingMetadata:
     """Public recording metadata without storage paths or key material."""
@@ -52,7 +71,7 @@ class RecordingMetadata:
     deletion_status: RecordingDeletionStatus
     deleted_at: datetime | None
     encryption_format_version: int
-    container_format: str
+    container_format: RecordingMediaFormat
     segment_count: int
     has_gaps: bool
 
@@ -76,7 +95,7 @@ class RecordingMetadata:
             raise ApplicationValidationError("Recording duration is invalid.")
         if self.encryption_format_version <= 0 or self.segment_count < 0:
             raise ApplicationValidationError("Recording metadata is invalid.")
-        if self.container_format != "m4a":
+        if not isinstance(self.container_format, RecordingMediaFormat):
             raise ApplicationValidationError(
                 "Recording container format is not supported."
             )

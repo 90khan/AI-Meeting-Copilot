@@ -9,6 +9,7 @@ from app.application.dto.recordings import (
     PrepareRecordingSessionCommand,
     PrepareRecordingSessionResult,
     RecordingDeletionStatus,
+    RecordingMediaFormat,
     RecordingMetadata,
     RecordingMetadataRecord,
     RecordingRetentionPolicy,
@@ -90,7 +91,7 @@ class PrepareRecordingSessionUseCase:
                 deletion_status=deletion_status,
                 deleted_at=None,
                 encryption_format_version=1,
-                container_format="m4a",
+                container_format=RecordingMediaFormat.WAV_PCM16_MONO_16KHZ_SEGMENTED_V1,
                 segment_count=0,
                 has_gaps=False,
             )

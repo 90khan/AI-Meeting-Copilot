@@ -5,6 +5,7 @@ from uuid import UUID
 
 from app.application.dto.recordings import (
     RecordingDeletionStatus,
+    RecordingMediaFormat,
     RecordingMetadata,
     RecordingMetadataRecord,
     RecordingRetentionPolicy,
@@ -148,7 +149,7 @@ def recording_record(
             deletion_status=deletion_status,
             deleted_at=now if state is RecordingState.DELETED else None,
             encryption_format_version=1,
-            container_format="m4a",
+            container_format=RecordingMediaFormat.LEGACY_M4A,
             segment_count=0,
             has_gaps=False,
         ),

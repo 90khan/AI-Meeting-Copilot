@@ -6,7 +6,10 @@ from uuid import uuid4
 
 import pytest
 from app.application.dto.recordings import (
+    RECORDING_SEGMENT_DURATION_SECONDS,
+    RECORDING_SEGMENT_OVERLAP_SECONDS,
     RecordingDeletionStatus,
+    RecordingMediaFormat,
     RecordingMetadata,
     RecordingRetentionPolicy,
     RecordingState,
@@ -32,7 +35,7 @@ def _metadata(**overrides: object) -> RecordingMetadata:
         "deletion_status": RecordingDeletionStatus.NOT_SCHEDULED,
         "deleted_at": None,
         "encryption_format_version": 1,
-        "container_format": "m4a",
+        "container_format": RecordingMediaFormat.LEGACY_M4A,
         "segment_count": 0,
         "has_gaps": False,
     }
@@ -82,3 +85,18 @@ def test_recording_metadata_rejects_non_utc_or_invalid_public_values() -> None:
         _metadata(container_format="wav")
     assert "path" not in RecordingMetadata.__dataclass_fields__
     assert "key" not in RecordingMetadata.__dataclass_fields__
+
+
+def test_v1_media_contract_is_versioned_and_non_overlapping() -> None:
+    metadata = _metadata(
+        container_format=RecordingMediaFormat.WAV_PCM16_MONO_16KHZ_SEGMENTED_V1
+    )
+
+    assert (
+        metadata.container_format
+        is RecordingMediaFormat.WAV_PCM16_MONO_16KHZ_SEGMENTED_V1
+    )
+    assert metadata.container_format.is_playback_supported
+    assert RECORDING_SEGMENT_DURATION_SECONDS == 5.0
+    assert RECORDING_SEGMENT_OVERLAP_SECONDS == 0.0
+    assert not RecordingMediaFormat.LEGACY_M4A.is_playback_supported

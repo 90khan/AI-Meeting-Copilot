@@ -18,7 +18,10 @@ from app.application.dto.recordings.playback import (
     RecordingPlaybackSegment,
 )
 from app.application.dto.recordings.recording import (
+    RECORDING_SEGMENT_DURATION_SECONDS,
+    RECORDING_SEGMENT_OVERLAP_SECONDS,
     RecordingDeletionStatus,
+    RecordingMediaFormat,
     RecordingMetadata,
     RecordingMetadataRecord,
     RecordingState,
@@ -38,6 +41,8 @@ from app.application.dto.recordings.retention_update import (
 from app.application.dto.recordings.storage import RecordingSegmentDescriptor
 
 __all__ = [
+    "RECORDING_SEGMENT_DURATION_SECONDS",
+    "RECORDING_SEGMENT_OVERLAP_SECONDS",
     "DeleteMeetingAudioCommand",
     "DeleteMeetingAudioResult",
     "FinalizeRecordingCommand",
@@ -51,6 +56,7 @@ __all__ = [
     "RecordingDeletionStatus",
     "RecordingEncryptionKey",
     "RecordingKeyReference",
+    "RecordingMediaFormat",
     "RecordingMetadata",
     "RecordingMetadataRecord",
     "RecordingPlaybackInfo",

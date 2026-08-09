@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from math import isfinite
 from uuid import UUID
 
+from app.application.dto.recordings.recording import RecordingMediaFormat
 from app.application.exceptions import ApplicationValidationError
 from app.domain.value_objects import MeetingId
 
@@ -14,7 +15,7 @@ class RecordingPlaybackInfo:
 
     recording_id: UUID
     meeting_id: MeetingId
-    format: str
+    format: RecordingMediaFormat
     duration_seconds: float | None
     segment_count: int
     has_gaps: bool
@@ -23,7 +24,8 @@ class RecordingPlaybackInfo:
         if (
             not isinstance(self.recording_id, UUID)
             or not isinstance(self.meeting_id, MeetingId)
-            or self.format != "m4a"
+            or not isinstance(self.format, RecordingMediaFormat)
+            or not self.format.is_playback_supported
             or type(self.segment_count) is not int
             or self.segment_count < 0
             or (

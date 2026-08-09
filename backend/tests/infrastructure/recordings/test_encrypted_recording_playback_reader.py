@@ -12,6 +12,7 @@ from app.application.dto.recordings import (
     RecordingDeletionStatus,
     RecordingEncryptionKey,
     RecordingKeyReference,
+    RecordingMediaFormat,
     RecordingMetadata,
     RecordingMetadataRecord,
     RecordingRetentionPolicy,
@@ -20,6 +21,7 @@ from app.application.dto.recordings import (
 )
 from app.application.exceptions import RecordingPlaybackUnavailableError
 from app.domain.value_objects import MeetingId
+from app.infrastructure.audio import WavChunkBuilder
 from app.infrastructure.recordings import (
     EncryptedRecordingPlaybackReader,
     EncryptedRecordingStorage,
@@ -55,7 +57,7 @@ def _record(**overrides: object) -> RecordingMetadataRecord:
         deletion_status=RecordingDeletionStatus.SCHEDULED,
         deleted_at=None,
         encryption_format_version=1,
-        container_format="m4a",
+        container_format=RecordingMediaFormat.WAV_PCM16_MONO_16KHZ_SEGMENTED_V1,
         segment_count=2,
         has_gaps=True,
     )
@@ -107,8 +109,10 @@ def test_completed_info_and_segments_stream_in_ascending_order(tmp_path: Path) -
     storage = _storage(tmp_path, keys)
 
     async def exercise() -> tuple[object, list[tuple[int, bytes]]]:
-        await _write(storage, 2, b"two")
-        await _write(storage, 0, b"zero")
+        second = WavChunkBuilder().build(b"\x02\x00").data
+        first = WavChunkBuilder().build(b"\x00\x00").data
+        await _write(storage, 2, second)
+        await _write(storage, 0, first)
         reader = await _reader(storage, keys, _record())
         info = await reader.get_info(_MEETING_ID)
         segments = [
@@ -119,34 +123,44 @@ def test_completed_info_and_segments_stream_in_ascending_order(tmp_path: Path) -
 
     info, segments = asyncio.run(exercise())
     assert info.has_gaps is True
-    assert segments == [(0, b"zero"), (2, b"two")]
+    assert [index for index, _ in segments] == [0, 2]
+    assert [payload[:4] for _, payload in segments] == [b"RIFF", b"RIFF"]
     assert not list(tmp_path.rglob("*.m4a"))
 
 
-def test_playback_storage_preserves_opaque_plaintext_without_media_validation(
+def test_opaque_plaintext_is_rejected_for_the_supported_wav_contract(
     tmp_path: Path,
 ) -> None:
-    """The current storage boundary has no codec or container contract.
-
-    This deliberately non-media payload proves that the encryption/playback
-    path preserves arbitrary bytes.  It must not be treated as an M4A, WAV,
-    raw AAC, PCM, or fragmented-MP4 producer until an encoder establishes one.
-    """
+    """Storage remains generic, but supported playback requires valid WAV."""
 
     keys = _Keys()
     storage = _storage(tmp_path, keys)
     opaque_payload = b"not-a-media-container\x00\xff"
 
-    async def exercise() -> bytes:
+    async def exercise() -> None:
         await _write(storage, 0, opaque_payload)
         reader = await _reader(storage, keys, _record())
-        async for item in reader.read_segments(_MEETING_ID):
-            return item.plaintext_audio
-        raise AssertionError("expected one opaque playback segment")
+        with pytest.raises(RecordingPlaybackUnavailableError):
+            _ = [item async for item in reader.read_segments(_MEETING_ID)]
 
-    assert asyncio.run(exercise()) == opaque_payload
+    asyncio.run(exercise())
     assert not list(tmp_path.rglob("*.m4a"))
     assert not list(tmp_path.rglob("*.wav"))
+
+
+def test_legacy_m4a_metadata_is_not_playable(tmp_path: Path) -> None:
+    keys = _Keys()
+    storage = _storage(tmp_path, keys)
+    legacy = _record(
+        metadata=replace(
+            _record().metadata,
+            container_format=RecordingMediaFormat.LEGACY_M4A,
+        )
+    )
+    reader = asyncio.run(_reader(storage, keys, legacy))
+
+    with pytest.raises(RecordingPlaybackUnavailableError):
+        asyncio.run(reader.get_info(_MEETING_ID))
 
 
 @pytest.mark.parametrize(

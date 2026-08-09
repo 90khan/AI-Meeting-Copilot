@@ -13,6 +13,9 @@ from app.infrastructure.recordings.recording_storage import EncryptedRecordingSt
 from app.infrastructure.recordings.unavailable_key_store import (
     UnavailableRecordingKeyStore,
 )
+from app.infrastructure.recordings.wav_recording_segment import (
+    validate_wav_recording_segment,
+)
 
 __all__ = [
     "EncryptedRecordingPlaybackReader",
@@ -20,4 +23,5 @@ __all__ = [
     "MacOSKeychainRecordingKeyStore",
     "RecordingStorageMetadataResolver",
     "UnavailableRecordingKeyStore",
+    "validate_wav_recording_segment",
 ]

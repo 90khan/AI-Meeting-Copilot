@@ -13,6 +13,7 @@ from app.api.routes.recording_playback import (
     router,
 )
 from app.application.dto.recordings import (
+    RecordingMediaFormat,
     RecordingPlaybackInfo,
     RecordingPlaybackSegment,
 )
@@ -43,7 +44,7 @@ class _Reader:
         return RecordingPlaybackInfo(
             recording_id=UUID(int=2),
             meeting_id=meeting_id,
-            format="m4a",
+            format=RecordingMediaFormat.WAV_PCM16_MONO_16KHZ_SEGMENTED_V1,
             duration_seconds=2.0,
             segment_count=2,
             has_gaps=True,

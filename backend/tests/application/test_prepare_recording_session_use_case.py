@@ -7,6 +7,7 @@ import pytest
 from app.application.dto.recordings import (
     PrepareRecordingSessionCommand,
     RecordingDeletionStatus,
+    RecordingMediaFormat,
     RecordingRetentionPolicy,
     RecordingState,
 )
@@ -98,6 +99,10 @@ async def test_active_meeting_prepares_opaque_pending_metadata(
     assert result.expires_at == expiry
     assert record.metadata.recording_id == UUID(int=1)
     assert record.metadata.state is RecordingState.PENDING
+    assert (
+        record.metadata.container_format
+        is RecordingMediaFormat.WAV_PCM16_MONO_16KHZ_SEGMENTED_V1
+    )
     assert record.metadata.deletion_status is (
         RecordingDeletionStatus.NOT_SCHEDULED
         if expiry is None

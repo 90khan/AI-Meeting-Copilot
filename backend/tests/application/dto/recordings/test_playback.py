@@ -5,6 +5,7 @@ from uuid import UUID
 
 import pytest
 from app.application.dto.recordings import (
+    RecordingMediaFormat,
     RecordingPlaybackInfo,
     RecordingPlaybackSegment,
 )
@@ -16,7 +17,7 @@ def test_playback_info_is_private_safe_and_immutable() -> None:
     info = RecordingPlaybackInfo(
         recording_id=UUID(int=1),
         meeting_id=MeetingId(UUID(int=2)),
-        format="m4a",
+        format=RecordingMediaFormat.WAV_PCM16_MONO_16KHZ_SEGMENTED_V1,
         duration_seconds=4.0,
         segment_count=2,
         has_gaps=True,
@@ -32,7 +33,7 @@ def test_playback_dtos_reject_invalid_values_and_redact_audio_repr() -> None:
         RecordingPlaybackInfo(
             recording_id=UUID(int=1),
             meeting_id=MeetingId(UUID(int=2)),
-            format="wav",
+            format=RecordingMediaFormat.LEGACY_M4A,
             duration_seconds=None,
             segment_count=0,
             has_gaps=False,
