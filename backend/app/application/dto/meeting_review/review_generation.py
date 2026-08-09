@@ -3,7 +3,10 @@
 from dataclasses import dataclass
 from enum import StrEnum
 
-from app.application.dto.meeting_review.review_artifact import MeetingReviewContent
+from app.application.dto.meeting_review.review_artifact import (
+    MeetingReviewArtifact,
+    MeetingReviewContent,
+)
 from app.application.dto.meeting_review.review_batch import TranscriptReviewBatch
 from app.application.exceptions import ApplicationValidationError
 from app.domain.value_objects import MeetingId
@@ -34,13 +37,13 @@ class GenerateMeetingReviewCommand:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class GenerateMeetingReviewResult:
-    """One in-memory generated review with no implied persistence semantics."""
+    """One persisted review artifact with explicit conservative reuse information."""
 
-    content: MeetingReviewContent
+    artifact: MeetingReviewArtifact
     reused_existing: bool
 
     def __post_init__(self) -> None:
-        if not isinstance(self.content, MeetingReviewContent) or not isinstance(
+        if not isinstance(self.artifact, MeetingReviewArtifact) or not isinstance(
             self.reused_existing, bool
         ):
             raise ApplicationValidationError(
