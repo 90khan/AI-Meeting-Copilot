@@ -4,6 +4,9 @@ from app.infrastructure.providers.ollama.client import OllamaClient
 from app.infrastructure.providers.ollama.german_simplification import (
     OllamaGermanSimplificationProvider,
 )
+from app.infrastructure.providers.ollama.meeting_review_generation import (
+    OllamaMeetingReviewGenerationProvider,
+)
 from app.infrastructure.providers.ollama.meeting_summarization import (
     OllamaMeetingSummarizationProvider,
 )
@@ -15,6 +18,7 @@ from app.infrastructure.providers.ollama.translation import OllamaTranslationPro
 __all__ = [
     "OllamaClient",
     "OllamaGermanSimplificationProvider",
+    "OllamaMeetingReviewGenerationProvider",
     "OllamaMeetingSummarizationProvider",
     "OllamaReplyCoachingProvider",
     "OllamaTranslationProvider",
