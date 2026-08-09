@@ -1,5 +1,8 @@
 """SQLAlchemy persistence adapters and metadata."""
 
+from app.infrastructure.persistence.sqlalchemy import (
+    meeting_review_artifact_repository,
+)
 from app.infrastructure.persistence.sqlalchemy.meeting_repository import (
     SQLAlchemyMeetingRepository,
 )
@@ -14,8 +17,13 @@ from app.infrastructure.persistence.sqlalchemy.recording_repository import (
 )
 from app.infrastructure.persistence.sqlalchemy.unit_of_work import SQLAlchemyUnitOfWork
 
+SQLAlchemyMeetingReviewArtifactRepository = (
+    meeting_review_artifact_repository.SQLAlchemyMeetingReviewArtifactRepository
+)
+
 __all__ = [
     "SQLAlchemyMeetingRepository",
+    "SQLAlchemyMeetingReviewArtifactRepository",
     "SQLAlchemyMeetingReviewRepository",
     "SQLAlchemyMeetingTranslationRepository",
     "SQLAlchemyRecordingRepository",

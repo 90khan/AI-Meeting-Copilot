@@ -5,6 +5,9 @@ from __future__ import annotations
 from types import TracebackType
 from typing import Protocol, Self
 
+from app.application.interfaces.meeting_review_artifact_repository import (
+    MeetingReviewArtifactRepository,
+)
 from app.application.interfaces.meeting_review_repository import MeetingReviewRepository
 from app.application.interfaces.meeting_translation_repository import (
     MeetingTranslationRepository,
@@ -31,6 +34,12 @@ class UnitOfWork(Protocol):
     @property
     def meeting_reviews(self) -> MeetingReviewRepository:
         """Return the read-only Meeting review query repository."""
+
+        ...
+
+    @property
+    def meeting_review_artifacts(self) -> MeetingReviewArtifactRepository:
+        """Return Meeting review artifact persistence for this work unit."""
 
         ...
 

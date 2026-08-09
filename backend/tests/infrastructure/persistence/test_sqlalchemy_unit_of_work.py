@@ -6,7 +6,10 @@ from collections.abc import Iterator
 import pytest
 from app.domain.entities import Meeting
 from app.infrastructure.database.base import Base
-from app.infrastructure.persistence.sqlalchemy import SQLAlchemyUnitOfWork
+from app.infrastructure.persistence.sqlalchemy import (
+    SQLAlchemyUnitOfWork,
+    meeting_review_artifact_repository,
+)
 from app.infrastructure.persistence.sqlalchemy.meeting_translation_repository import (
     SQLAlchemyMeetingTranslationRepository,
 )
@@ -15,6 +18,10 @@ from app.infrastructure.persistence.sqlalchemy.recording_repository import (
 )
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
+
+SQLAlchemyMeetingReviewArtifactRepository = (
+    meeting_review_artifact_repository.SQLAlchemyMeetingReviewArtifactRepository
+)
 
 
 @pytest.fixture
@@ -79,6 +86,26 @@ def test_context_creates_a_session_bound_translation_artifact_repository(
 
     with pytest.raises(RuntimeError, match="not active"):
         _ = unit_of_work.meeting_translations
+
+
+def test_context_creates_a_session_bound_review_artifact_repository(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """Review artifact persistence follows the active-context lifecycle."""
+
+    unit_of_work = SQLAlchemyUnitOfWork(session_factory)
+
+    async def exercise_context() -> None:
+        async with unit_of_work as active_unit_of_work:
+            assert isinstance(
+                active_unit_of_work.meeting_review_artifacts,
+                SQLAlchemyMeetingReviewArtifactRepository,
+            )
+
+    asyncio.run(exercise_context())
+
+    with pytest.raises(RuntimeError, match="not active"):
+        _ = unit_of_work.meeting_review_artifacts
 
 
 def test_commit_persists_data(session_factory: sessionmaker[Session]) -> None:

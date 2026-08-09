@@ -28,6 +28,8 @@ def test_initial_migration_upgrades_and_downgrades_sqlite(
             assert set(inspector.get_table_names()) >= {
                 "alembic_version",
                 "meetings",
+                "meeting_review_artifacts",
+                "meeting_translation_artifacts",
                 "transcript_entries",
             }
             assert {column["name"] for column in inspector.get_columns("meetings")} == {
@@ -95,6 +97,40 @@ def test_initial_migration_upgrades_and_downgrades_sqlite(
                 "ix_meeting_translation_artifacts_meeting_language",
                 "ix_meeting_translation_artifacts_status",
                 "ix_meeting_translation_artifacts_created_at",
+            }
+            assert {
+                column["name"]
+                for column in inspector.get_columns("meeting_review_artifacts")
+            } == {
+                "artifact_id",
+                "meeting_id",
+                "version",
+                "review_type",
+                "status",
+                "created_at",
+                "completed_at",
+                "source_transcript_count",
+                "provider_name",
+                "model_name",
+                "prompt_version",
+                "schema_version",
+                "failure_code",
+                "content_json",
+            }
+            assert any(
+                constraint["column_names"] == ["meeting_id", "review_type", "version"]
+                for constraint in inspector.get_unique_constraints(
+                    "meeting_review_artifacts"
+                )
+            )
+            assert {
+                index["name"]
+                for index in inspector.get_indexes("meeting_review_artifacts")
+            } == {
+                "ix_meeting_review_artifacts_meeting_id",
+                "ix_meeting_review_artifacts_meeting_type",
+                "ix_meeting_review_artifacts_status",
+                "ix_meeting_review_artifacts_created_at",
             }
         finally:
             engine.dispose()

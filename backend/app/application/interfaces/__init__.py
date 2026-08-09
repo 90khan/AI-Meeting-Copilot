@@ -13,6 +13,9 @@ from app.application.interfaces.ai import (
     TranslationProviderFactory,
 )
 from app.application.interfaces.live_transcription import LiveTranscriptionSession
+from app.application.interfaces.meeting_review_artifact_repository import (
+    MeetingReviewArtifactRepository,
+)
 from app.application.interfaces.meeting_review_repository import MeetingReviewRepository
 from app.application.interfaces.meeting_translation_repository import (
     MeetingTranslationRepository,
@@ -30,6 +33,7 @@ __all__ = [
     "GermanSimplificationProvider",
     "GermanSimplificationProviderFactory",
     "LiveTranscriptionSession",
+    "MeetingReviewArtifactRepository",
     "MeetingReviewRepository",
     "MeetingSummarizationProvider",
     "MeetingSummarizationProviderFactory",

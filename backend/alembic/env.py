@@ -7,6 +7,7 @@ from app.core.config import get_settings
 from app.infrastructure.database.base import Base
 from app.infrastructure.persistence.sqlalchemy.models import (
     MeetingModel,
+    MeetingReviewArtifactModel,
     MeetingTranslationArtifactModel,
     TranscriptEntryModel,
 )
@@ -18,7 +19,12 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 target_metadata = Base.metadata
-ORM_MODELS = (MeetingModel, TranscriptEntryModel, MeetingTranslationArtifactModel)
+ORM_MODELS = (
+    MeetingModel,
+    MeetingReviewArtifactModel,
+    MeetingTranslationArtifactModel,
+    TranscriptEntryModel,
+)
 
 
 def _database_url() -> str:

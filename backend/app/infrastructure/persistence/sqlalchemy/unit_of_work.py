@@ -5,12 +5,18 @@ from typing import Self
 
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.application.interfaces.meeting_review_artifact_repository import (
+    MeetingReviewArtifactRepository,
+)
 from app.application.interfaces.meeting_review_repository import MeetingReviewRepository
 from app.application.interfaces.meeting_translation_repository import (
     MeetingTranslationRepository,
 )
 from app.application.interfaces.recording_repository import RecordingRepository
 from app.domain.repositories import MeetingRepository
+from app.infrastructure.persistence.sqlalchemy import (
+    meeting_review_artifact_repository,
+)
 from app.infrastructure.persistence.sqlalchemy.meeting_repository import (
     SQLAlchemyMeetingRepository,
 )
@@ -22,6 +28,10 @@ from app.infrastructure.persistence.sqlalchemy.meeting_translation_repository im
 )
 from app.infrastructure.persistence.sqlalchemy.recording_repository import (
     SQLAlchemyRecordingRepository,
+)
+
+SQLAlchemyMeetingReviewArtifactRepository = (
+    meeting_review_artifact_repository.SQLAlchemyMeetingReviewArtifactRepository
 )
 
 
@@ -36,6 +46,9 @@ class SQLAlchemyUnitOfWork:
         self._meetings: SQLAlchemyMeetingRepository | None = None
         self._recordings: SQLAlchemyRecordingRepository | None = None
         self._meeting_reviews: SQLAlchemyMeetingReviewRepository | None = None
+        self._meeting_review_artifacts: (
+            SQLAlchemyMeetingReviewArtifactRepository | None
+        ) = None
         self._meeting_translations: SQLAlchemyMeetingTranslationRepository | None = None
 
     @property
@@ -62,6 +75,14 @@ class SQLAlchemyUnitOfWork:
         return self._meeting_reviews
 
     @property
+    def meeting_review_artifacts(self) -> MeetingReviewArtifactRepository:
+        """Return the active Meeting review artifact repository."""
+
+        if self._meeting_review_artifacts is None:
+            raise RuntimeError("Unit of Work is not active.")
+        return self._meeting_review_artifacts
+
+    @property
     def meeting_translations(self) -> MeetingTranslationRepository:
         """Return the active Meeting translation artifact repository."""
 
@@ -86,6 +107,9 @@ class SQLAlchemyUnitOfWork:
         self._meetings = SQLAlchemyMeetingRepository(session)
         self._recordings = SQLAlchemyRecordingRepository(session)
         self._meeting_reviews = SQLAlchemyMeetingReviewRepository(session)
+        self._meeting_review_artifacts = SQLAlchemyMeetingReviewArtifactRepository(
+            session
+        )
         self._meeting_translations = SQLAlchemyMeetingTranslationRepository(session)
         return self
 
@@ -106,6 +130,7 @@ class SQLAlchemyUnitOfWork:
             self._meetings = None
             self._recordings = None
             self._meeting_reviews = None
+            self._meeting_review_artifacts = None
             self._meeting_translations = None
             self._session = None
 
