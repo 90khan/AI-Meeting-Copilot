@@ -146,6 +146,7 @@ pub(crate) struct ChunkSenderTask {
     queue: Arc<FinalizedChunkQueue>,
     stopped: Arc<AtomicBool>,
     failed: Arc<AtomicBool>,
+    failure_notify: Arc<Notify>,
     handle: JoinHandle<()>,
 }
 
@@ -154,9 +155,11 @@ impl ChunkSenderTask {
         let queue = FinalizedChunkQueue::new();
         let stopped = Arc::new(AtomicBool::new(false));
         let failed = Arc::new(AtomicBool::new(false));
+        let failure_notify = Arc::new(Notify::new());
         let task_queue = Arc::clone(&queue);
         let task_stopped = Arc::clone(&stopped);
         let task_failed = Arc::clone(&failed);
+        let task_failure_notify = Arc::clone(&failure_notify);
 
         let handle = tokio::spawn(async move {
             while !task_stopped.load(Ordering::Acquire) {
@@ -168,6 +171,7 @@ impl ChunkSenderTask {
                 }
                 if submitter.submit(chunk).await.is_err() {
                     task_failed.store(true, Ordering::Release);
+                    task_failure_notify.notify_waiters();
                     task_queue.clear();
                     return;
                 }
@@ -179,6 +183,7 @@ impl ChunkSenderTask {
                 queue: Arc::clone(&queue),
                 stopped,
                 failed,
+                failure_notify,
                 handle,
             },
             queue,
@@ -204,6 +209,14 @@ impl ChunkSenderTask {
 
     pub(crate) fn failed(&self) -> bool {
         self.failed.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn failure_signal(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.failed)
+    }
+
+    pub(crate) fn failure_notifier(&self) -> Arc<Notify> {
+        Arc::clone(&self.failure_notify)
     }
 }
 
