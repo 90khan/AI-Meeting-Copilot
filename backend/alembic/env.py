@@ -7,10 +7,8 @@ from app.core.config import get_settings
 from app.infrastructure.database.base import Base
 from app.infrastructure.persistence.sqlalchemy.models import (
     MeetingModel,
-    TranscriptEntryModel,
-)
-from app.infrastructure.persistence.sqlalchemy.models.meeting_translation_artifact_model import (
     MeetingTranslationArtifactModel,
+    TranscriptEntryModel,
 )
 from sqlalchemy import engine_from_config, pool
 
