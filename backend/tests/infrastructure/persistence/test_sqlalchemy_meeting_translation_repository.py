@@ -197,3 +197,26 @@ def test_database_enforces_unique_meeting_language_version() -> None:
     session.rollback()
     session.close()
     engine.dispose()
+
+
+def test_get_by_meeting_and_version_returns_only_the_exact_artifact() -> None:
+    session, engine = _session()
+    repository = SQLAlchemyMeetingTranslationRepository(session)
+    first = _artifact(1, version=1)
+    second = _artifact(2, version=2)
+
+    async def exercise() -> MeetingTranslationArtifact | None:
+        await repository.save(first)
+        await repository.save(second)
+        return await repository.get_by_meeting_and_version(
+            _MEETING_ID,
+            target_language="tr",
+            version=2,
+        )
+
+    loaded = asyncio.run(exercise())
+
+    assert loaded == second
+    session.rollback()
+    session.close()
+    engine.dispose()

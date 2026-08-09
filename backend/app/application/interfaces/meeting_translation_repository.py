@@ -38,6 +38,17 @@ class MeetingTranslationRepository(Protocol):
 
         ...
 
+    async def get_by_meeting_and_version(
+        self,
+        meeting_id: MeetingId,
+        *,
+        target_language: str,
+        version: int,
+    ) -> MeetingTranslationArtifact | None:
+        """Return one exact persisted version for a Meeting and language."""
+
+        ...
+
     async def list_for_meeting(
         self,
         meeting_id: MeetingId,

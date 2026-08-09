@@ -12,10 +12,16 @@ from app.application.dto.meeting_review.translation_generation import (
     GenerateMeetingTranslationCommand,
     GenerateMeetingTranslationResult,
 )
+from app.application.dto.meeting_review.translation_read import (
+    GetMeetingTranslationQuery,
+    GetMeetingTranslationResult,
+)
 
 __all__ = [
     "GenerateMeetingTranslationCommand",
     "GenerateMeetingTranslationResult",
+    "GetMeetingTranslationQuery",
+    "GetMeetingTranslationResult",
     "MeetingDetail",
     "MeetingHistoryItem",
     "MeetingTranslationArtifact",

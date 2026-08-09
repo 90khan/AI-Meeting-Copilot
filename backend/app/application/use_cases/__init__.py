@@ -12,6 +12,9 @@ from app.application.use_cases.generate_reply_suggestions import (
     GenerateReplySuggestionsUseCase,
 )
 from app.application.use_cases.get_meeting_detail import GetMeetingDetailUseCase
+from app.application.use_cases.get_meeting_translation import (
+    GetMeetingTranslationUseCase,
+)
 from app.application.use_cases.list_meetings import ListMeetingsUseCase
 from app.application.use_cases.mark_recording_failed import MarkRecordingFailedUseCase
 from app.application.use_cases.mark_recording_started import MarkRecordingStartedUseCase
@@ -46,6 +49,7 @@ __all__ = [
     "GenerateMeetingTranslationUseCase",
     "GenerateReplySuggestionsUseCase",
     "GetMeetingDetailUseCase",
+    "GetMeetingTranslationUseCase",
     "ListMeetingsUseCase",
     "MarkRecordingFailedUseCase",
     "MarkRecordingStartedUseCase",

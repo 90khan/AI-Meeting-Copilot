@@ -90,6 +90,23 @@ class SQLAlchemyMeetingTranslationRepository(MeetingTranslationRepository):
         latest_version = self._session.scalar(statement)
         return None if latest_version is None else int(latest_version)
 
+    async def get_by_meeting_and_version(
+        self,
+        meeting_id: MeetingId,
+        *,
+        target_language: str,
+        version: int,
+    ) -> MeetingTranslationArtifact | None:
+        """Return an exact immutable artifact version when it exists."""
+
+        statement = select(MeetingTranslationArtifactModel).where(
+            MeetingTranslationArtifactModel.meeting_id == str(meeting_id),
+            MeetingTranslationArtifactModel.target_language == target_language,
+            MeetingTranslationArtifactModel.version == version,
+        )
+        model = self._session.scalar(statement)
+        return None if model is None else self._to_artifact(model)
+
     async def list_for_meeting(
         self,
         meeting_id: MeetingId,
