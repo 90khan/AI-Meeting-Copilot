@@ -123,6 +123,32 @@ def test_completed_info_and_segments_stream_in_ascending_order(tmp_path: Path) -
     assert not list(tmp_path.rglob("*.m4a"))
 
 
+def test_playback_storage_preserves_opaque_plaintext_without_media_validation(
+    tmp_path: Path,
+) -> None:
+    """The current storage boundary has no codec or container contract.
+
+    This deliberately non-media payload proves that the encryption/playback
+    path preserves arbitrary bytes.  It must not be treated as an M4A, WAV,
+    raw AAC, PCM, or fragmented-MP4 producer until an encoder establishes one.
+    """
+
+    keys = _Keys()
+    storage = _storage(tmp_path, keys)
+    opaque_payload = b"not-a-media-container\x00\xff"
+
+    async def exercise() -> bytes:
+        await _write(storage, 0, opaque_payload)
+        reader = await _reader(storage, keys, _record())
+        async for item in reader.read_segments(_MEETING_ID):
+            return item.plaintext_audio
+        raise AssertionError("expected one opaque playback segment")
+
+    assert asyncio.run(exercise()) == opaque_payload
+    assert not list(tmp_path.rglob("*.m4a"))
+    assert not list(tmp_path.rglob("*.wav"))
+
+
 @pytest.mark.parametrize(
     "state",
     [
