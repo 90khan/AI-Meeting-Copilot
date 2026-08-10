@@ -40,6 +40,11 @@ from app.application.dto.recordings.retention_update import (
     UpdateAudioRetentionCommand,
     UpdateAudioRetentionResult,
 )
+from app.application.dto.recordings.seek import (
+    RecordingSeekResolution,
+    RecordingSeekTarget,
+    ResolveRecordingSeekCommand,
+)
 from app.application.dto.recordings.segment_timing import RecordingSegmentTiming
 from app.application.dto.recordings.storage import RecordingSegmentDescriptor
 
@@ -65,9 +70,12 @@ __all__ = [
     "RecordingPlaybackInfo",
     "RecordingPlaybackSegment",
     "RecordingRetentionPolicy",
+    "RecordingSeekResolution",
+    "RecordingSeekTarget",
     "RecordingSegmentDescriptor",
     "RecordingSegmentTiming",
     "RecordingState",
+    "ResolveRecordingSeekCommand",
     "UpdateAudioRetentionCommand",
     "UpdateAudioRetentionResult",
     "WriteRecordingSegmentCommand",

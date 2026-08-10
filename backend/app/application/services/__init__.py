@@ -21,9 +21,14 @@ from app.application.services.recording_retention_cleanup import (
 from app.application.services.recording_storage_reconciler import (
     RecordingStorageReconciler,
 )
+from app.application.services.recording_timing import (
+    RECORDING_PLAYBACK_SAMPLE_RATE_HZ,
+    total_samples_for_contiguous_timing,
+)
 from app.application.services.transcript_deduplicator import TranscriptDeduplicator
 
 __all__ = [
+    "RECORDING_PLAYBACK_SAMPLE_RATE_HZ",
     "AssistModeConfiguration",
     "AssistModeLifecycleState",
     "AssistModeOrchestrator",
@@ -38,4 +43,5 @@ __all__ = [
     "mark_deleting",
     "mark_deletion_failed",
     "mark_storage_missing",
+    "total_samples_for_contiguous_timing",
 ]

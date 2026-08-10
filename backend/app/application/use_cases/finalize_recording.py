@@ -6,11 +6,14 @@ from math import isclose
 from app.application.dto.recordings import (
     FinalizeRecordingCommand,
     RecordingMediaFormat,
-    RecordingSegmentTiming,
     RecordingState,
 )
 from app.application.exceptions import ApplicationValidationError
 from app.application.interfaces import UnitOfWorkFactory
+from app.application.services.recording_timing import (
+    RECORDING_PLAYBACK_SAMPLE_RATE_HZ,
+    total_samples_for_contiguous_timing,
+)
 from app.domain.exceptions import InvalidStateTransitionError
 
 
@@ -40,7 +43,12 @@ class FinalizeRecordingUseCase:
                 timings = await timing_repository.list_for_recording(
                     command.recording_id
                 )
-                segment_count, duration_seconds = self._derive_v1_completion(timings)
+                total_samples = total_samples_for_contiguous_timing(
+                    recording_id=command.recording_id,
+                    timings=timings,
+                )
+                segment_count = len(timings)
+                duration_seconds = total_samples / RECORDING_PLAYBACK_SAMPLE_RATE_HZ
                 if command.segment_count != segment_count or not isclose(
                     command.duration_seconds,
                     duration_seconds,
@@ -63,32 +71,3 @@ class FinalizeRecordingUseCase:
                 )
             )
             await unit_of_work.commit()
-
-    @staticmethod
-    def _derive_v1_completion(
-        timings: tuple[RecordingSegmentTiming, ...],
-    ) -> tuple[int, float]:
-        if not timings:
-            raise ApplicationValidationError("Recording timing metadata is invalid.")
-
-        previous: RecordingSegmentTiming | None = None
-        total_samples = 0
-        for timing in timings:
-            if timing.sample_count <= 0 or (
-                previous is None
-                and (timing.segment_index != 0 or timing.start_sample != 0)
-            ):
-                raise ApplicationValidationError(
-                    "Recording timing metadata is invalid."
-                )
-            if previous is not None and (
-                timing.segment_index != previous.segment_index + 1
-                or timing.start_sample != previous.start_sample + previous.sample_count
-            ):
-                raise ApplicationValidationError(
-                    "Recording timing metadata is invalid."
-                )
-            total_samples += timing.sample_count
-            previous = timing
-
-        return len(timings), total_samples / 16_000.0
