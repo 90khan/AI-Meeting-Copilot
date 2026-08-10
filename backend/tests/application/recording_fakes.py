@@ -9,6 +9,7 @@ from app.application.dto.recordings import (
     RecordingMetadata,
     RecordingMetadataRecord,
     RecordingRetentionPolicy,
+    RecordingSegmentTiming,
     RecordingState,
 )
 from app.application.dto.recordings.encryption import RecordingKeyReference
@@ -69,15 +70,42 @@ class FakeRecordingRepository:
         )
 
 
+class FakeRecordingSegmentTimingRepository:
+    def __init__(
+        self,
+        timings: list[RecordingSegmentTiming] | None = None,
+    ) -> None:
+        self.timings = list(timings or [])
+        self.list_calls = 0
+
+    async def list_for_recording(
+        self,
+        recording_id: UUID,
+    ) -> tuple[RecordingSegmentTiming, ...]:
+        self.list_calls += 1
+        return tuple(
+            sorted(
+                (
+                    timing
+                    for timing in self.timings
+                    if timing.recording_id == recording_id
+                ),
+                key=lambda timing: timing.segment_index,
+            )
+        )
+
+
 class FakeUnitOfWork:
     def __init__(
         self,
         meetings: list[Meeting] | None = None,
         records: list[RecordingMetadataRecord] | None = None,
+        timings: list[RecordingSegmentTiming] | None = None,
         recording_save_error: Exception | None = None,
     ) -> None:
         self.meetings = FakeMeetingRepository(meetings)
         self.recordings = FakeRecordingRepository(records, recording_save_error)
+        self.recording_segment_timings = FakeRecordingSegmentTimingRepository(timings)
         self.commits = 0
         self.exited = False
 
