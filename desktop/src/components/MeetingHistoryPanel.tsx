@@ -8,6 +8,8 @@ import {
 } from "../history/client";
 import type { MeetingDetail, MeetingHistoryItem } from "../history/types";
 import type { MeetingTranslationArtifact } from "../history/translationTypes";
+import { buildTranscriptTimeline, findActiveTranscriptId } from "../playback/transcriptSync";
+import type { PlaybackState } from "../playback/types";
 import { MeetingReviewPanel } from "./MeetingReviewPanel";
 import { RecordingPlayer } from "./RecordingPlayer";
 
@@ -144,6 +146,34 @@ function MeetingDetailPanel({
 }) {
   if (loading) return <p aria-live="polite">Loading Meeting transcript…</p>;
   if (detail === null) return <p>Select a Meeting to view its original transcript.</p>;
+  return <MeetingDetailContent key={detail.meetingId} detail={detail} />;
+}
+
+function MeetingDetailContent({ detail }: { detail: MeetingDetail }) {
+  const [timing, setTiming] = useState<{ captureAnchorUtc: string; hasGaps: boolean } | null>(null);
+  const [positionSeconds, setPositionSeconds] = useState(0);
+  const [syncActive, setSyncActive] = useState(false);
+  const timeline = useMemo(
+    () => timing === null || timing.hasGaps
+      ? null
+      : buildTranscriptTimeline(detail.transcript, timing.captureAnchorUtc),
+    [detail.transcript, timing],
+  );
+  const activeTranscriptId = useMemo(
+    () => syncActive && timeline !== null
+      ? findActiveTranscriptId(timeline, positionSeconds)
+      : null,
+    [positionSeconds, syncActive, timeline],
+  );
+  const synchronizationUnavailable = detail.audioHasGaps || timing?.hasGaps === true || (timing !== null && timeline === null);
+  const handlePlaybackStateChange = (state: PlaybackState): void => {
+    if (state === "stopped" || state === "failed" || state === "loading") {
+      setSyncActive(false);
+      if (state !== "loading") setPositionSeconds(0);
+      return;
+    }
+    if (state === "playing" || state === "paused" || state === "ended") setSyncActive(true);
+  };
   return (
     <article className="meeting-detail" aria-labelledby="meeting-detail-title">
       <h3 id="meeting-detail-title">{detail.title}</h3>
@@ -156,9 +186,17 @@ function MeetingDetailPanel({
           meetingId={detail.meetingId}
           durationSeconds={detail.recordingDurationSeconds}
           hasGaps={detail.audioHasGaps}
+          onPositionChange={setPositionSeconds}
+          onPlaybackStateChange={handlePlaybackStateChange}
+          onTimingAvailable={setTiming}
         />
       )}
-      <MeetingTranslationPanel key={detail.meetingId} detail={detail} />
+      <MeetingTranslationPanel
+        key={detail.meetingId}
+        detail={detail}
+        activeTranscriptId={activeTranscriptId}
+        synchronizationUnavailable={synchronizationUnavailable}
+      />
       <MeetingReviewPanel key={detail.meetingId} meetingId={detail.meetingId} />
     </article>
   );
@@ -174,7 +212,15 @@ type TranslationState =
 
 type TranscriptDisplay = "original" | "turkish" | "side-by-side";
 
-function MeetingTranslationPanel({ detail }: { detail: MeetingDetail }) {
+function MeetingTranslationPanel({
+  detail,
+  activeTranscriptId,
+  synchronizationUnavailable,
+}: {
+  detail: MeetingDetail;
+  activeTranscriptId: string | null;
+  synchronizationUnavailable: boolean;
+}) {
   const [translation, setTranslation] = useState<TranslationState>({ kind: "idle" });
   const [display, setDisplay] = useState<TranscriptDisplay>("original");
   const mounted = useRef(true);
@@ -261,6 +307,13 @@ function MeetingTranslationPanel({ detail }: { detail: MeetingDetail }) {
           </>
         )}
       </p>
+      {synchronizationUnavailable && (
+        <p className="transcript-sync-status" aria-live="polite">
+          {detail.audioHasGaps
+            ? "Transcript synchronization is unavailable because this recording contains capture gaps."
+            : "Transcript synchronization is unavailable."}
+        </p>
+      )}
       <fieldset className="transcript-display-toggle" disabled={translation.kind === "generating"}>
         <legend>Transcript display</legend>
         <label>
@@ -300,8 +353,9 @@ function MeetingTranslationPanel({ detail }: { detail: MeetingDetail }) {
           const missingTranslation = translationReady && translatedText === undefined;
           return (
             <article
-              className={`meeting-transcript-row ${activeDisplay === "side-by-side" ? "side-by-side" : ""}`}
+              className={`meeting-transcript-row ${activeDisplay === "side-by-side" ? "side-by-side" : ""} ${entry.transcriptId === activeTranscriptId ? "transcript-row--active" : ""}`}
               key={entry.transcriptId}
+              aria-current={entry.transcriptId === activeTranscriptId ? "true" : undefined}
             >
               <header>
                 <time dateTime={entry.timestamp}>{displayTimestamp(entry.timestamp)}</time>

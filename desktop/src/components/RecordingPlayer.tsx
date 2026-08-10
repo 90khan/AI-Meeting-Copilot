@@ -3,10 +3,11 @@ import { useEffect, useRef, useState } from "react";
 import { activateRecordingPlaybackEvents, prepareRecordingPlayback, startRecordingPlaybackStream, stopRecordingPlayback } from "../playback/client";
 import { subscribeToPlaybackEvents } from "../playback/events";
 import { initialPlaybackState } from "../playback/state";
-import type { PlaybackChunkEvent, PlaybackUiState } from "../playback/types";
+import type { PlaybackChunkEvent, PlaybackState, PlaybackUiState, RecordingPlaybackInfo } from "../playback/types";
 
 const GENERIC_FAILURE = "Playback is unavailable.";
 const SCHEDULE_LEAD_SECONDS = 0.05;
+const POSITION_UPDATE_INTERVAL_MS = 200;
 
 function base64Bytes(encoded: string): ArrayBuffer {
   const binary = window.atob(encoded);
@@ -21,10 +22,13 @@ function timeLabel(seconds: number | null): string {
   return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
 }
 
-export function RecordingPlayer({ meetingId, durationSeconds, hasGaps }: {
+export function RecordingPlayer({ meetingId, durationSeconds, hasGaps, onPositionChange, onPlaybackStateChange, onTimingAvailable }: {
   meetingId: string;
   durationSeconds: number | null;
   hasGaps: boolean;
+  onPositionChange?: (seconds: number) => void;
+  onPlaybackStateChange?: (state: PlaybackState) => void;
+  onTimingAvailable?: (timing: Pick<RecordingPlaybackInfo, "captureAnchorUtc" | "hasGaps">) => void;
 }) {
   const [state, setState] = useState<PlaybackUiState>({ ...initialPlaybackState, meetingId, durationSeconds, hasGaps });
   const stateRef = useRef(state);
@@ -36,9 +40,21 @@ export function RecordingPlayer({ meetingId, durationSeconds, hasGaps }: {
   const lastIndexRef = useRef<number | null>(null);
   const decodeChainRef = useRef<Promise<void>>(Promise.resolve());
   const animationFrameRef = useRef<number | null>(null);
+  const lastPositionUpdateRef = useRef(0);
   const mountedRef = useRef(true);
+  const onPositionChangeRef = useRef(onPositionChange);
+  const onPlaybackStateChangeRef = useRef(onPlaybackStateChange);
+  const onTimingAvailableRef = useRef(onTimingAvailable);
+  onPositionChangeRef.current = onPositionChange;
+  onPlaybackStateChangeRef.current = onPlaybackStateChange;
+  onTimingAvailableRef.current = onTimingAvailable;
 
-  const update = (next: PlaybackUiState): void => { stateRef.current = next; if (mountedRef.current) setState(next); };
+  const update = (next: PlaybackUiState): void => {
+    const previousState = stateRef.current.state;
+    stateRef.current = next;
+    if (previousState !== next.state) onPlaybackStateChangeRef.current?.(next.state);
+    if (mountedRef.current) setState(next);
+  };
   const cleanupAudio = (): void => {
     if (animationFrameRef.current !== null) cancelAnimationFrame(animationFrameRef.current);
     animationFrameRef.current = null;
@@ -49,9 +65,11 @@ export function RecordingPlayer({ meetingId, durationSeconds, hasGaps }: {
     if (context !== null && context.state !== "closed") void context.close();
     nextScheduledTimeRef.current = 0; firstScheduledTimeRef.current = 0; lastIndexRef.current = null;
     decodeChainRef.current = Promise.resolve();
+    lastPositionUpdateRef.current = 0;
   };
   const fail = (): void => {
     cleanupAudio(); generationRef.current = null;
+    onPositionChangeRef.current?.(0);
     update({ ...stateRef.current, state: "failed", playbackGeneration: null, inputComplete: false });
     void stopRecordingPlayback().catch(() => undefined);
   };
@@ -60,13 +78,21 @@ export function RecordingPlayer({ meetingId, durationSeconds, hasGaps }: {
     const current = stateRef.current;
     if (context === null || current.state !== "playing") return;
     const elapsed = Math.max(0, context.currentTime - firstScheduledTimeRef.current);
-    update({ ...current, currentTimeSeconds: current.durationSeconds === null ? elapsed : Math.min(elapsed, current.durationSeconds) });
+    const now = performance.now();
+    if (now - lastPositionUpdateRef.current >= POSITION_UPDATE_INTERVAL_MS) {
+      const position = current.durationSeconds === null ? elapsed : Math.min(elapsed, current.durationSeconds);
+      lastPositionUpdateRef.current = now;
+      update({ ...current, currentTimeSeconds: position });
+      onPositionChangeRef.current?.(position);
+    }
     animationFrameRef.current = requestAnimationFrame(tick);
   };
   const maybeFinish = (): void => {
     const current = stateRef.current;
     if (!current.inputComplete || sourcesRef.current.size !== 0) return;
-    update({ ...current, state: "ended", currentTimeSeconds: current.durationSeconds ?? current.currentTimeSeconds });
+    const position = current.durationSeconds ?? current.currentTimeSeconds;
+    update({ ...current, state: "ended", currentTimeSeconds: position });
+    onPositionChangeRef.current?.(position);
   };
   const scheduleChunk = async (event: PlaybackChunkEvent): Promise<void> => {
     if (event.generation !== generationRef.current || stateRef.current.state === "failed") return;
@@ -126,12 +152,20 @@ export function RecordingPlayer({ meetingId, durationSeconds, hasGaps }: {
       const generation = await startRecordingPlaybackStream();
       generationRef.current = generation;
       update({ ...stateRef.current, state: "playing", meetingId, playbackGeneration: generation, durationSeconds: info.durationSeconds, captureAnchorUtc: info.captureAnchorUtc, hasGaps: info.hasGaps, currentTimeSeconds: 0, inputComplete: false, lastSegmentIndex: null });
+      onPositionChangeRef.current?.(0);
+      onTimingAvailableRef.current?.({ captureAnchorUtc: info.captureAnchorUtc, hasGaps: info.hasGaps });
       await activateRecordingPlaybackEvents(generation);
       tick();
     } catch { fail(); }
   };
   const pause = async (): Promise<void> => { try { await contextRef.current?.suspend(); update({ ...stateRef.current, state: "paused" }); } catch { fail(); } };
-  const stop = async (): Promise<void> => { cleanupAudio(); generationRef.current = null; try { await stopRecordingPlayback(); } catch { /* status remains safe */ } update({ ...initialPlaybackState, state: "stopped", meetingId, durationSeconds, hasGaps }); };
+  const stop = async (): Promise<void> => {
+    cleanupAudio();
+    generationRef.current = null;
+    onPositionChangeRef.current?.(0);
+    update({ ...initialPlaybackState, state: "stopped", meetingId, durationSeconds, hasGaps });
+    try { await stopRecordingPlayback(); } catch { /* status remains safe */ }
+  };
   const playing = state.state === "playing";
   const canPause = playing;
   return <section className="recording-player" aria-labelledby="recording-player-title">
