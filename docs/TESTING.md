@@ -622,3 +622,29 @@ raw audio/WAV data. The deterministic Rust tests cover the non-permission
 queue, encoding, submission, and cleanup boundaries separately.
 
 ---
+
+# Local Recording and Playback Smoke Validation
+
+Run this manual macOS validation only with local services. Start Ollama and a
+configured local Faster-Whisper backend, then launch the Tauri desktop app.
+Grant the required Screen Recording/System Audio and Microphone permissions.
+
+1. Start the backend, create and start a Meeting, then start the live session.
+2. Enable recording, explicitly confirm consent, select capture sources, and
+   capture long enough to create multiple recording segments.
+3. Stop capture and end the Meeting. Open **History** and confirm the complete
+   original transcript remains available.
+4. Generate or reopen the Turkish translation and Meeting Review.
+5. Play, pause, resume, and stop the recording. Seek with the progress control
+   and by selecting a transcript row; verify the highlight and follow control.
+6. Quit and restart the app, then reopen the Meeting and confirm the persisted
+   transcript, translation, review, and playable recording metadata remain
+   readable.
+
+Do not print or copy transcript, audio, token, key, path, prompt, or provider
+response data while validating. If capture reports gaps, playback remains
+available but exact transcript synchronization and transcript-row seeking are
+intentionally unavailable. Normal CI does not run this permission-dependent
+manual flow.
+
+---
