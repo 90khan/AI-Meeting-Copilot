@@ -23,6 +23,9 @@ from app.application.interfaces.meeting_translation_repository import (
 from app.application.interfaces.recording_key_store import RecordingKeyStore
 from app.application.interfaces.recording_playback_reader import RecordingPlaybackReader
 from app.application.interfaces.recording_repository import RecordingRepository
+from app.application.interfaces.recording_segment_timing_repository import (
+    RecordingSegmentTimingRepository,
+)
 from app.application.interfaces.recording_storage import (
     RecordingSegmentWriter,
     RecordingStorage,
@@ -42,6 +45,7 @@ __all__ = [
     "RecordingKeyStore",
     "RecordingPlaybackReader",
     "RecordingRepository",
+    "RecordingSegmentTimingRepository",
     "RecordingSegmentWriter",
     "RecordingStorage",
     "ReplyCoachingProvider",

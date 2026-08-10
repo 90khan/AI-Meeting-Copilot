@@ -30,6 +30,8 @@ def test_initial_migration_upgrades_and_downgrades_sqlite(
                 "meetings",
                 "meeting_review_artifacts",
                 "meeting_translation_artifacts",
+                "recording_metadata",
+                "recording_segment_timing",
                 "transcript_entries",
             }
             assert {column["name"] for column in inspector.get_columns("meetings")} == {
@@ -131,6 +133,32 @@ def test_initial_migration_upgrades_and_downgrades_sqlite(
                 "ix_meeting_review_artifacts_meeting_type",
                 "ix_meeting_review_artifacts_status",
                 "ix_meeting_review_artifacts_created_at",
+            }
+            assert {
+                column["name"]
+                for column in inspector.get_columns("recording_segment_timing")
+            } == {
+                "recording_id",
+                "segment_index",
+                "sample_count",
+                "start_sample",
+            }
+            primary_key = inspector.get_pk_constraint("recording_segment_timing")
+            assert primary_key["constrained_columns"] == [
+                "recording_id",
+                "segment_index",
+            ]
+            timing_foreign_keys = inspector.get_foreign_keys("recording_segment_timing")
+            assert len(timing_foreign_keys) == 1
+            assert timing_foreign_keys[0]["referred_table"] == "recording_metadata"
+            assert timing_foreign_keys[0]["constrained_columns"] == ["recording_id"]
+            assert timing_foreign_keys[0]["options"]["ondelete"] == "CASCADE"
+            assert {
+                index["name"]
+                for index in inspector.get_indexes("recording_segment_timing")
+            } == {
+                "ix_recording_segment_timing_recording_id",
+                "ix_recording_segment_timing_recording_index",
             }
         finally:
             engine.dispose()

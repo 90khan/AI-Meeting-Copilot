@@ -11,12 +11,16 @@ from app.infrastructure.persistence.sqlalchemy.models.transcript_entry_model imp
 
 from .meeting_review_artifact_model import MeetingReviewArtifactModel
 from .meeting_translation_artifact_model import MeetingTranslationArtifactModel
+from .recording_segment_timing_model import (
+    RecordingSegmentTimingModel,
+)
 
 __all__ = [
     "MeetingModel",
     "MeetingReviewArtifactModel",
     "MeetingTranslationArtifactModel",
     "RecordingMetadataModel",
+    "RecordingSegmentTimingModel",
     "TimestampMixin",
     "TranscriptEntryModel",
 ]

@@ -13,6 +13,9 @@ from app.application.interfaces.meeting_translation_repository import (
     MeetingTranslationRepository,
 )
 from app.application.interfaces.recording_repository import RecordingRepository
+from app.application.interfaces.recording_segment_timing_repository import (
+    RecordingSegmentTimingRepository,
+)
 from app.domain.repositories import MeetingRepository
 
 
@@ -30,6 +33,9 @@ class UnitOfWork(Protocol):
         """Return recording metadata storage bound to this work unit."""
 
         ...
+
+    @property
+    def recording_segment_timings(self) -> RecordingSegmentTimingRepository: ...
 
     @property
     def meeting_reviews(self) -> MeetingReviewRepository:

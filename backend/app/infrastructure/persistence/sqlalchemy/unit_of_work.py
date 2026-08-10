@@ -13,9 +13,13 @@ from app.application.interfaces.meeting_translation_repository import (
     MeetingTranslationRepository,
 )
 from app.application.interfaces.recording_repository import RecordingRepository
+from app.application.interfaces.recording_segment_timing_repository import (
+    RecordingSegmentTimingRepository,
+)
 from app.domain.repositories import MeetingRepository
 from app.infrastructure.persistence.sqlalchemy import (
     meeting_review_artifact_repository,
+    recording_segment_timing_repository,
 )
 from app.infrastructure.persistence.sqlalchemy.meeting_repository import (
     SQLAlchemyMeetingRepository,
@@ -33,6 +37,9 @@ from app.infrastructure.persistence.sqlalchemy.recording_repository import (
 SQLAlchemyMeetingReviewArtifactRepository = (
     meeting_review_artifact_repository.SQLAlchemyMeetingReviewArtifactRepository
 )
+SQLAlchemyRecordingSegmentTimingRepository = (
+    recording_segment_timing_repository.SQLAlchemyRecordingSegmentTimingRepository
+)
 
 
 class SQLAlchemyUnitOfWork:
@@ -45,6 +52,9 @@ class SQLAlchemyUnitOfWork:
         self._session: Session | None = None
         self._meetings: SQLAlchemyMeetingRepository | None = None
         self._recordings: SQLAlchemyRecordingRepository | None = None
+        self._recording_segment_timings: (
+            SQLAlchemyRecordingSegmentTimingRepository | None
+        ) = None
         self._meeting_reviews: SQLAlchemyMeetingReviewRepository | None = None
         self._meeting_review_artifacts: (
             SQLAlchemyMeetingReviewArtifactRepository | None
@@ -67,6 +77,12 @@ class SQLAlchemyUnitOfWork:
         if self._recordings is None:
             raise RuntimeError("Unit of Work is not active.")
         return self._recordings
+
+    @property
+    def recording_segment_timings(self) -> RecordingSegmentTimingRepository:
+        if self._recording_segment_timings is None:
+            raise RuntimeError("Unit of Work is not active.")
+        return self._recording_segment_timings
 
     @property
     def meeting_reviews(self) -> MeetingReviewRepository:
@@ -106,6 +122,9 @@ class SQLAlchemyUnitOfWork:
         self._session = session
         self._meetings = SQLAlchemyMeetingRepository(session)
         self._recordings = SQLAlchemyRecordingRepository(session)
+        self._recording_segment_timings = SQLAlchemyRecordingSegmentTimingRepository(
+            session
+        )
         self._meeting_reviews = SQLAlchemyMeetingReviewRepository(session)
         self._meeting_review_artifacts = SQLAlchemyMeetingReviewArtifactRepository(
             session
@@ -129,6 +148,7 @@ class SQLAlchemyUnitOfWork:
             session.close()
             self._meetings = None
             self._recordings = None
+            self._recording_segment_timings = None
             self._meeting_reviews = None
             self._meeting_review_artifacts = None
             self._meeting_translations = None

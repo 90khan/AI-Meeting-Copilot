@@ -9,6 +9,7 @@ from app.infrastructure.database.base import Base
 from app.infrastructure.persistence.sqlalchemy import (
     SQLAlchemyUnitOfWork,
     meeting_review_artifact_repository,
+    recording_segment_timing_repository,
 )
 from app.infrastructure.persistence.sqlalchemy.meeting_translation_repository import (
     SQLAlchemyMeetingTranslationRepository,
@@ -21,6 +22,9 @@ from sqlalchemy.orm import Session, sessionmaker
 
 SQLAlchemyMeetingReviewArtifactRepository = (
     meeting_review_artifact_repository.SQLAlchemyMeetingReviewArtifactRepository
+)
+SQLAlchemyRecordingSegmentTimingRepository = (
+    recording_segment_timing_repository.SQLAlchemyRecordingSegmentTimingRepository
 )
 
 
@@ -66,6 +70,28 @@ def test_context_creates_a_session_bound_recording_repository(
 
     with pytest.raises(RuntimeError, match="not active"):
         _ = unit_of_work.recordings
+
+
+def test_context_creates_a_session_bound_recording_segment_timing_repository(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """Segment timing storage shares the active Unit of Work session."""
+
+    unit_of_work = SQLAlchemyUnitOfWork(session_factory)
+
+    with pytest.raises(RuntimeError, match="not active"):
+        _ = unit_of_work.recording_segment_timings
+
+    async def exercise_context() -> None:
+        async with unit_of_work as active_unit_of_work:
+            repository = active_unit_of_work.recording_segment_timings
+            assert isinstance(repository, SQLAlchemyRecordingSegmentTimingRepository)
+            assert repository._session is active_unit_of_work.session
+
+    asyncio.run(exercise_context())
+
+    with pytest.raises(RuntimeError, match="not active"):
+        _ = unit_of_work.recording_segment_timings
 
 
 def test_context_creates_a_session_bound_translation_artifact_repository(

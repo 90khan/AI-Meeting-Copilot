@@ -2,6 +2,7 @@
 
 from app.infrastructure.persistence.sqlalchemy import (
     meeting_review_artifact_repository,
+    recording_segment_timing_repository,
 )
 from app.infrastructure.persistence.sqlalchemy.meeting_repository import (
     SQLAlchemyMeetingRepository,
@@ -20,6 +21,9 @@ from app.infrastructure.persistence.sqlalchemy.unit_of_work import SQLAlchemyUni
 SQLAlchemyMeetingReviewArtifactRepository = (
     meeting_review_artifact_repository.SQLAlchemyMeetingReviewArtifactRepository
 )
+SQLAlchemyRecordingSegmentTimingRepository = (
+    recording_segment_timing_repository.SQLAlchemyRecordingSegmentTimingRepository
+)
 
 __all__ = [
     "SQLAlchemyMeetingRepository",
@@ -27,5 +31,6 @@ __all__ = [
     "SQLAlchemyMeetingReviewRepository",
     "SQLAlchemyMeetingTranslationRepository",
     "SQLAlchemyRecordingRepository",
+    "SQLAlchemyRecordingSegmentTimingRepository",
     "SQLAlchemyUnitOfWork",
 ]
