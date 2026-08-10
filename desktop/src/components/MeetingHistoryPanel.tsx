@@ -154,6 +154,7 @@ function MeetingDetailContent({ detail }: { detail: MeetingDetail }) {
   const [timing, setTiming] = useState<{ captureAnchorUtc: string; hasGaps: boolean } | null>(null);
   const [positionSeconds, setPositionSeconds] = useState(0);
   const [syncActive, setSyncActive] = useState(false);
+  const [playbackState, setPlaybackState] = useState<PlaybackState>("idle");
   const timeline = useMemo(
     () => timing === null || timing.hasGaps
       ? null
@@ -181,6 +182,7 @@ function MeetingDetailContent({ detail }: { detail: MeetingDetail }) {
     playbackRef.current?.seekTo(target);
   };
   const handlePlaybackStateChange = (state: PlaybackState): void => {
+    setPlaybackState(state);
     if (state === "stopped" || state === "failed" || state === "loading") {
       setSyncActive(false);
       if (state !== "loading") setPositionSeconds(0);
@@ -213,6 +215,7 @@ function MeetingDetailContent({ detail }: { detail: MeetingDetail }) {
         synchronizationUnavailable={synchronizationUnavailable}
         canSeekTranscript={canSeekTranscript}
         onSeekTranscript={seekTranscript}
+        playbackState={playbackState}
       />
       <MeetingReviewPanel key={detail.meetingId} meetingId={detail.meetingId} />
     </article>
@@ -235,16 +238,23 @@ function MeetingTranslationPanel({
   synchronizationUnavailable,
   canSeekTranscript,
   onSeekTranscript,
+  playbackState,
 }: {
   detail: MeetingDetail;
   activeTranscriptId: string | null;
   synchronizationUnavailable: boolean;
   canSeekTranscript: boolean;
   onSeekTranscript: (transcriptId: string) => void;
+  playbackState: PlaybackState;
 }) {
   const [translation, setTranslation] = useState<TranslationState>({ kind: "idle" });
   const [display, setDisplay] = useState<TranscriptDisplay>("original");
+  const [autoFollowEnabled, setAutoFollowEnabled] = useState(true);
   const mounted = useRef(true);
+  const transcriptContainerRef = useRef<HTMLDivElement>(null);
+  const transcriptRowRefs = useRef(new Map<string, HTMLElement>());
+  const lastAutoScrolledTranscriptId = useRef<string | null>(null);
+  const manualScrollIntentUntil = useRef(0);
 
   useEffect(() => {
     mounted.current = true;
@@ -268,6 +278,20 @@ function MeetingTranslationPanel({
       mounted.current = false;
     };
   }, [detail.meetingId]);
+
+  useEffect(() => {
+    transcriptRowRefs.current.clear();
+    lastAutoScrolledTranscriptId.current = null;
+    manualScrollIntentUntil.current = 0;
+    setAutoFollowEnabled(true);
+  }, [detail.meetingId]);
+
+  useEffect(() => {
+    if (playbackState === "stopped" || playbackState === "failed") {
+      lastAutoScrolledTranscriptId.current = null;
+      setAutoFollowEnabled(true);
+    }
+  }, [playbackState]);
 
   const translationsByTranscriptId = useMemo(() => {
     if (translation.kind !== "ready") return new Map<string, string>();
@@ -302,6 +326,53 @@ function MeetingTranslationPanel({
   const pending = translation.kind === "loading" || translation.kind === "generating";
   const translationReady = translation.kind === "ready";
   const activeDisplay = translation.kind === "generating" ? "original" : display;
+  const scrollToTranscript = (transcriptId: string): void => {
+    const row = transcriptRowRefs.current.get(transcriptId);
+    if (row === undefined) return;
+    row.scrollIntoView({ block: "center", behavior: "smooth" });
+    lastAutoScrolledTranscriptId.current = transcriptId;
+  };
+  const activeRowIsMeaningfullyAway = (): boolean => {
+    if (activeTranscriptId === null) return false;
+    const container = transcriptContainerRef.current;
+    const row = transcriptRowRefs.current.get(activeTranscriptId);
+    if (container === null || row === undefined) return false;
+    const containerBounds = container.getBoundingClientRect();
+    const rowBounds = row.getBoundingClientRect();
+    const margin = 48;
+    return rowBounds.bottom < containerBounds.top + margin || rowBounds.top > containerBounds.bottom - margin;
+  };
+  const markManualScrollIntent = (): void => {
+    manualScrollIntentUntil.current = Date.now() + 750;
+  };
+  const handleTranscriptScroll = (): void => {
+    if (!autoFollowEnabled || Date.now() > manualScrollIntentUntil.current) return;
+    if (activeRowIsMeaningfullyAway()) setAutoFollowEnabled(false);
+  };
+  const followPlayback = (): void => {
+    if (activeTranscriptId === null) return;
+    setAutoFollowEnabled(true);
+    scrollToTranscript(activeTranscriptId);
+  };
+  const handleTranscriptSeek = (transcriptId: string): void => {
+    setAutoFollowEnabled(true);
+    lastAutoScrolledTranscriptId.current = null;
+    onSeekTranscript(transcriptId);
+  };
+
+  useEffect(() => {
+    lastAutoScrolledTranscriptId.current = null;
+  }, [activeDisplay]);
+
+  useEffect(() => {
+    if (
+      synchronizationUnavailable ||
+      !autoFollowEnabled ||
+      activeTranscriptId === null ||
+      activeTranscriptId === lastAutoScrolledTranscriptId.current
+    ) return;
+    scrollToTranscript(activeTranscriptId);
+  }, [activeDisplay, activeTranscriptId, autoFollowEnabled, synchronizationUnavailable]);
 
   return (
     <section className="meeting-translation" aria-labelledby="translation-title">
@@ -365,7 +436,25 @@ function MeetingTranslationPanel({
           Side by side
         </label>
       </fieldset>
-      <div className="meeting-transcript" aria-label="Meeting transcript">
+      {!synchronizationUnavailable && !autoFollowEnabled && activeTranscriptId !== null && (
+        <button className="follow-playback" type="button" onClick={followPlayback}>
+          Follow playback
+        </button>
+      )}
+      <div
+        className="meeting-transcript"
+        ref={transcriptContainerRef}
+        aria-label="Meeting transcript"
+        onScroll={handleTranscriptScroll}
+        onWheel={markManualScrollIntent}
+        onTouchStart={markManualScrollIntent}
+        onPointerDown={markManualScrollIntent}
+        onKeyDown={(event) => {
+          if (["ArrowDown", "ArrowUp", "PageDown", "PageUp", "Home", "End"].includes(event.key)) {
+            markManualScrollIntent();
+          }
+        }}
+      >
         {detail.transcript.length === 0 && (
           <p className="meeting-transcript-empty">No transcript entries.</p>
         )}
@@ -376,14 +465,18 @@ function MeetingTranslationPanel({
             <article
               className={`meeting-transcript-row ${activeDisplay === "side-by-side" ? "side-by-side" : ""} ${entry.transcriptId === activeTranscriptId ? "transcript-row--active" : ""} ${canSeekTranscript ? "meeting-transcript-row--seekable" : ""}`}
               key={entry.transcriptId}
+              ref={(node) => {
+                if (node === null) transcriptRowRefs.current.delete(entry.transcriptId);
+                else transcriptRowRefs.current.set(entry.transcriptId, node);
+              }}
               aria-current={entry.transcriptId === activeTranscriptId ? "true" : undefined}
               role={canSeekTranscript ? "button" : undefined}
               tabIndex={canSeekTranscript ? 0 : undefined}
-              onClick={canSeekTranscript ? () => onSeekTranscript(entry.transcriptId) : undefined}
+              onClick={canSeekTranscript ? () => handleTranscriptSeek(entry.transcriptId) : undefined}
               onKeyDown={canSeekTranscript ? (event) => {
                 if (event.key === "Enter" || event.key === " ") {
                   event.preventDefault();
-                  onSeekTranscript(entry.transcriptId);
+                  handleTranscriptSeek(entry.transcriptId);
                 }
               } : undefined}
             >
