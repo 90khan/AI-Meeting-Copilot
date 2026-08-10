@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use reqwest::StatusCode;
-use tauri::State;
+use serde::Serialize;
+use tauri::{Emitter, State};
 use tokio::sync::{mpsc, oneshot, Mutex};
 use uuid::Uuid;
 
@@ -15,12 +17,69 @@ use super::types::{
 use crate::sidecar::manager::SidecarManager;
 
 const PLAYBACK_AUDIO_BUFFER_CAPACITY: usize = 3;
+const PLAYBACK_CHUNK_EVENT: &str = "playback://chunk";
+const PLAYBACK_ENDED_EVENT: &str = "playback://ended";
+const PLAYBACK_FAILED_EVENT: &str = "playback://failed";
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PlaybackChunkEvent {
+    generation: u64,
+    segment_index: u32,
+    /// One self-contained WAV segment only. The full recording is never
+    /// accumulated or serialised as one value.
+    wav_payload_base64: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PlaybackTerminalEvent {
+    generation: u64,
+}
+
+pub(crate) trait PlaybackEventSink: Send + Sync {
+    fn emit_chunk(&self, event: PlaybackChunkEvent) -> Result<(), ()>;
+    fn emit_ended(&self, event: PlaybackTerminalEvent) -> Result<(), ()>;
+    fn emit_failed(&self, event: PlaybackTerminalEvent) -> Result<(), ()>;
+}
+
+#[derive(Clone)]
+pub struct TauriPlaybackEventSink {
+    app_handle: tauri::AppHandle,
+}
+
+impl TauriPlaybackEventSink {
+    pub fn new(app_handle: tauri::AppHandle) -> Self {
+        Self { app_handle }
+    }
+}
+
+impl PlaybackEventSink for TauriPlaybackEventSink {
+    fn emit_chunk(&self, event: PlaybackChunkEvent) -> Result<(), ()> {
+        self.app_handle
+            .emit(PLAYBACK_CHUNK_EVENT, event)
+            .map_err(|_| ())
+    }
+
+    fn emit_ended(&self, event: PlaybackTerminalEvent) -> Result<(), ()> {
+        self.app_handle
+            .emit(PLAYBACK_ENDED_EVENT, event)
+            .map_err(|_| ())
+    }
+
+    fn emit_failed(&self, event: PlaybackTerminalEvent) -> Result<(), ()> {
+        self.app_handle
+            .emit(PLAYBACK_FAILED_EVENT, event)
+            .map_err(|_| ())
+    }
+}
 
 struct PlaybackState {
     state: RecordingPlaybackState,
     info: Option<RecordingPlaybackInfo>,
     meeting_id: Option<Uuid>,
     stream_task: Option<tokio::task::JoinHandle<()>>,
+    event_task: Option<tokio::task::JoinHandle<()>>,
     audio_receiver: Option<Arc<Mutex<mpsc::Receiver<PlaybackAudioChunk>>>>,
     stream_generation: u64,
 }
@@ -31,6 +90,7 @@ impl Default for PlaybackState {
             info: None,
             meeting_id: None,
             stream_task: None,
+            event_task: None,
             audio_receiver: None,
             stream_generation: 0,
         }
@@ -41,6 +101,7 @@ impl Default for PlaybackState {
 pub struct RecordingPlaybackManager {
     state: Arc<Mutex<PlaybackState>>,
     sidecar: SidecarManager,
+    event_sink: Arc<Mutex<Option<Arc<dyn PlaybackEventSink>>>>,
 }
 
 impl RecordingPlaybackManager {
@@ -48,7 +109,13 @@ impl RecordingPlaybackManager {
         Self {
             state: Arc::new(Mutex::new(PlaybackState::default())),
             sidecar,
+            event_sink: Arc::new(Mutex::new(None)),
         }
+    }
+
+    pub(crate) fn set_event_sink(&self, sink: Arc<dyn PlaybackEventSink>) {
+        let event_sink = Arc::clone(&self.event_sink);
+        tauri::async_runtime::block_on(async move { *event_sink.lock().await = Some(sink) });
     }
     pub async fn status(&self) -> RecordingPlaybackStatus {
         let state = self.state.lock().await;
@@ -96,18 +163,23 @@ impl RecordingPlaybackManager {
         Ok(public_status(&state))
     }
     pub async fn stop(&self) -> RecordingPlaybackStatus {
-        let (task, receiver) = {
+        let (task, event_task, receiver) = {
             let mut state = self.state.lock().await;
             state.state = RecordingPlaybackState::Stopping;
             state.stream_generation = state.stream_generation.wrapping_add(1);
             let task = state.stream_task.take();
+            let event_task = state.event_task.take();
             let receiver = state.audio_receiver.take();
             state.info = None;
             state.meeting_id = None;
             state.state = RecordingPlaybackState::Stopped;
-            (task, receiver)
+            (task, event_task, receiver)
         };
         if let Some(task) = task {
+            task.abort();
+            let _ = task.await;
+        }
+        if let Some(task) = event_task {
             task.abort();
             let _ = task.await;
         }
@@ -119,7 +191,7 @@ impl RecordingPlaybackManager {
 
     /// Opens a fresh, authenticated stream for the prepared recording. The
     /// receiver is deliberately internal until the player transport exists.
-    pub async fn start_streaming(&self) -> Result<(), ()> {
+    pub async fn start_streaming(&self) -> Result<u64, ()> {
         let meeting_id = {
             let mut state = self.state.lock().await;
             if state.state != RecordingPlaybackState::Ready || state.stream_task.is_some() {
@@ -171,6 +243,40 @@ impl RecordingPlaybackManager {
         state.stream_task = Some(task);
         drop(state);
         let _ = launch_sender.send(());
+        Ok(generation)
+    }
+
+    /// Activates the Tauri event pump only after its opaque generation has
+    /// been returned to the WebView. This prevents an early first chunk from
+    /// being mistaken for a stale event by the player.
+    pub async fn activate_event_pump(&self, generation: u64) -> Result<(), ()> {
+        if self.event_sink.lock().await.is_none() {
+            return Err(());
+        }
+        let (receiver, state) = {
+            let state = self.state.lock().await;
+            if state.stream_generation != generation
+                || state.state != RecordingPlaybackState::Streaming
+                || state.event_task.is_some()
+            {
+                return Err(());
+            }
+            let receiver = state.audio_receiver.clone().ok_or(())?;
+            (receiver, Arc::clone(&self.state))
+        };
+        let event_sink = Arc::clone(&self.event_sink);
+        let task = tokio::spawn(async move {
+            pump_playback_events(state, event_sink, receiver, generation).await;
+        });
+        let mut state = self.state.lock().await;
+        if state.stream_generation != generation
+            || state.state != RecordingPlaybackState::Streaming
+            || state.event_task.is_some()
+        {
+            task.abort();
+            return Err(());
+        }
+        state.event_task = Some(task);
         Ok(())
     }
 
@@ -210,6 +316,95 @@ impl RecordingPlaybackManager {
             return Err(());
         }
         Ok(info)
+    }
+}
+
+/// The only bridge that serialises plaintext segments to the WebView. It
+/// receives at most the existing three queued chunks and encodes one segment
+/// at a time for Tauri's JSON event transport.
+async fn pump_playback_events(
+    state: Arc<Mutex<PlaybackState>>,
+    event_sink: Arc<Mutex<Option<Arc<dyn PlaybackEventSink>>>>,
+    receiver: Arc<Mutex<mpsc::Receiver<PlaybackAudioChunk>>>,
+    generation: u64,
+) {
+    loop {
+        let chunk = receiver.lock().await.recv().await;
+        let Some(chunk) = chunk else {
+            let outcome = {
+                let state = state.lock().await;
+                if state.stream_generation != generation {
+                    return;
+                }
+                match state.state {
+                    // The stream task updates this to Ready before dropping
+                    // its sender. Streaming is retained as a defensive
+                    // clean-close case for a receiver whose sender has ended
+                    // immediately after the final frame.
+                    RecordingPlaybackState::Ready | RecordingPlaybackState::Streaming => Some(true),
+                    RecordingPlaybackState::Failed => Some(false),
+                    _ => None,
+                }
+            };
+            let Some(clean_end) = outcome else { return };
+            let sink = event_sink.lock().await.clone();
+            if let Some(sink) = sink {
+                let event = PlaybackTerminalEvent { generation };
+                let _ = if clean_end {
+                    sink.emit_ended(event)
+                } else {
+                    sink.emit_failed(event)
+                };
+            }
+            finish_event_pump(Arc::clone(&state), generation, clean_end).await;
+            return;
+        };
+        let active = {
+            let state = state.lock().await;
+            state.stream_generation == generation
+                && state.state == RecordingPlaybackState::Streaming
+        };
+        if !active {
+            return;
+        }
+        let sink = event_sink.lock().await.clone();
+        let Some(sink) = sink else { continue };
+        if sink
+            .emit_chunk(PlaybackChunkEvent {
+                generation,
+                segment_index: chunk.segment_index,
+                wav_payload_base64: BASE64.encode(chunk.bytes),
+            })
+            .is_err()
+        {
+            fail_event_delivery(Arc::clone(&state), generation).await;
+            return;
+        }
+    }
+}
+
+async fn finish_event_pump(state: Arc<Mutex<PlaybackState>>, generation: u64, clean_end: bool) {
+    let mut state = state.lock().await;
+    if state.stream_generation != generation {
+        return;
+    }
+    state.event_task.take();
+    if clean_end && state.state == RecordingPlaybackState::Ready {
+        state.state = RecordingPlaybackState::Stopped;
+    }
+}
+
+async fn fail_event_delivery(state: Arc<Mutex<PlaybackState>>, generation: u64) {
+    let receiver = {
+        let mut state = state.lock().await;
+        if state.stream_generation != generation {
+            return;
+        }
+        state.state = RecordingPlaybackState::Failed;
+        state.audio_receiver.take()
+    };
+    if let Some(receiver) = receiver {
+        clear_buffered_audio(&receiver).await;
     }
 }
 
@@ -329,7 +524,8 @@ async fn clear_buffered_audio(receiver: &Arc<Mutex<mpsc::Receiver<PlaybackAudioC
 #[cfg(test)]
 mod tests {
     use super::{
-        process_frame, process_stream_bytes, PlaybackState, RecordingPlaybackManager,
+        process_frame, process_stream_bytes, pump_playback_events, PlaybackChunkEvent,
+        PlaybackEventSink, PlaybackState, PlaybackTerminalEvent, RecordingPlaybackManager,
         PLAYBACK_AUDIO_BUFFER_CAPACITY,
     };
     use crate::recording_playback::protocol::{
@@ -361,6 +557,41 @@ mod tests {
         bytes.extend_from_slice(&(payload.len() as u32).to_be_bytes());
         bytes.extend_from_slice(payload);
         bytes
+    }
+
+    #[derive(Default)]
+    struct FakeEventSink {
+        events: std::sync::Mutex<Vec<(String, u64, Option<u32>)>>,
+    }
+
+    impl PlaybackEventSink for FakeEventSink {
+        fn emit_chunk(&self, event: PlaybackChunkEvent) -> Result<(), ()> {
+            self.events.lock().expect("test event lock").push((
+                "chunk".to_owned(),
+                event.generation,
+                Some(event.segment_index),
+            ));
+            assert!(!event.wav_payload_base64.contains("sensitive audio bytes"));
+            Ok(())
+        }
+
+        fn emit_ended(&self, event: PlaybackTerminalEvent) -> Result<(), ()> {
+            self.events.lock().expect("test event lock").push((
+                "ended".to_owned(),
+                event.generation,
+                None,
+            ));
+            Ok(())
+        }
+
+        fn emit_failed(&self, event: PlaybackTerminalEvent) -> Result<(), ()> {
+            self.events.lock().expect("test event lock").push((
+                "failed".to_owned(),
+                event.generation,
+                None,
+            ));
+            Ok(())
+        }
     }
 
     #[tokio::test]
@@ -396,13 +627,14 @@ mod tests {
                 state: RecordingPlaybackState::Ready,
                 info: Some(RecordingPlaybackInfo {
                     meeting_id: meeting_id.to_string(),
-                    format: "m4a".to_owned(),
+                    format: "wav_pcm16_mono_16khz_segmented_v1".to_owned(),
                     duration_seconds: Some(1.0),
                     segment_count: 1,
                     has_gaps: false,
                 }),
                 meeting_id: Some(meeting_id),
                 stream_task: None,
+                event_task: None,
                 audio_receiver: None,
                 stream_generation: 0,
             };
@@ -569,6 +801,60 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn event_pump_preserves_chunk_order_and_emits_one_clean_end() {
+        let state = Arc::new(Mutex::new(PlaybackState {
+            state: RecordingPlaybackState::Streaming,
+            stream_generation: 6,
+            ..PlaybackState::default()
+        }));
+        let sink = Arc::new(FakeEventSink::default());
+        let sink_state: Arc<Mutex<Option<Arc<dyn PlaybackEventSink>>>> =
+            Arc::new(Mutex::new(Some(sink.clone())));
+        let (sender, receiver) = mpsc::channel(PLAYBACK_AUDIO_BUFFER_CAPACITY);
+        sender
+            .send(PlaybackAudioChunk {
+                segment_index: 2,
+                bytes: b"one".to_vec(),
+            })
+            .await
+            .expect("receiver active");
+        sender
+            .send(PlaybackAudioChunk {
+                segment_index: 4,
+                bytes: b"two".to_vec(),
+            })
+            .await
+            .expect("receiver active");
+        drop(sender);
+        pump_playback_events(state, sink_state, Arc::new(Mutex::new(receiver)), 6).await;
+
+        assert_eq!(
+            *sink.events.lock().expect("test event lock"),
+            vec![
+                ("chunk".to_owned(), 6, Some(2)),
+                ("chunk".to_owned(), 6, Some(4)),
+                ("ended".to_owned(), 6, None),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_event_pump_does_not_emit_after_a_new_generation() {
+        let state = Arc::new(Mutex::new(PlaybackState {
+            state: RecordingPlaybackState::Stopped,
+            stream_generation: 8,
+            ..PlaybackState::default()
+        }));
+        let sink = Arc::new(FakeEventSink::default());
+        let event_sink: Arc<Mutex<Option<Arc<dyn PlaybackEventSink>>>> =
+            Arc::new(Mutex::new(Some(sink.clone())));
+        let (sender, receiver) = mpsc::channel(1);
+        drop(sender);
+        pump_playback_events(state, event_sink, Arc::new(Mutex::new(receiver)), 7).await;
+        assert!(sink.events.lock().expect("test event lock").is_empty());
+    }
+
     #[test]
     fn audio_chunks_redact_plaintext_from_debug_output_and_buffer_is_small() {
         let chunk = PlaybackAudioChunk {
@@ -618,9 +904,19 @@ pub async fn stop_recording_playback(
 #[tauri::command]
 pub async fn start_recording_playback_stream(
     manager: State<'_, RecordingPlaybackManager>,
-) -> Result<(), String> {
+) -> Result<u64, String> {
     manager
         .start_streaming()
+        .await
+        .map_err(|_| "Playback is unavailable.".to_owned())
+}
+#[tauri::command]
+pub async fn activate_recording_playback_events(
+    manager: State<'_, RecordingPlaybackManager>,
+    generation: u64,
+) -> Result<(), String> {
+    manager
+        .activate_event_pump(generation)
         .await
         .map_err(|_| "Playback is unavailable.".to_owned())
 }

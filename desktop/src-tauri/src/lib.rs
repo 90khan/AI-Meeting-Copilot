@@ -16,8 +16,9 @@ use live_transcription::client::{
     list_meetings, start_live_transcription_session, start_meeting, LiveTranscriptionClient,
 };
 use recording_playback::manager::{
-    get_recording_playback_info, get_recording_playback_status, prepare_recording_playback,
-    start_recording_playback_stream, stop_recording_playback, RecordingPlaybackManager,
+    activate_recording_playback_events, get_recording_playback_info, get_recording_playback_status,
+    prepare_recording_playback, start_recording_playback_stream, stop_recording_playback,
+    RecordingPlaybackManager,
 };
 use sidecar::manager::{get_backend_status, start_backend, stop_backend, SidecarManager};
 use tauri::Manager;
@@ -32,7 +33,7 @@ pub fn run() {
     let app = tauri::Builder::default()
         .manage(sidecar_manager)
         .manage(live_transcription_client.clone())
-        .manage(playback_manager)
+        .manage(playback_manager.clone())
         .manage(audio_capture_coordinator)
         .invoke_handler(tauri::generate_handler![
             start_backend,
@@ -61,6 +62,7 @@ pub fn run() {
             get_recording_playback_info,
             prepare_recording_playback,
             start_recording_playback_stream,
+            activate_recording_playback_events,
             stop_recording_playback,
             get_recording_playback_status,
         ])
@@ -69,6 +71,9 @@ pub fn run() {
 
     live_transcription_client.set_event_sink(std::sync::Arc::new(
         assist_mode::events::TauriAssistEventSink::new(app.handle().clone()),
+    ));
+    playback_manager.set_event_sink(std::sync::Arc::new(
+        recording_playback::manager::TauriPlaybackEventSink::new(app.handle().clone()),
     ));
 
     app.run(|app_handle, event| {

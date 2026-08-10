@@ -9,6 +9,7 @@ import {
 import type { MeetingDetail, MeetingHistoryItem } from "../history/types";
 import type { MeetingTranslationArtifact } from "../history/translationTypes";
 import { MeetingReviewPanel } from "./MeetingReviewPanel";
+import { RecordingPlayer } from "./RecordingPlayer";
 
 const HISTORY_LIMIT = 100;
 
@@ -149,6 +150,14 @@ function MeetingDetailPanel({
       <p>Status: {detail.status}</p>
       <p>Started: {displayTimestamp(detail.startedAt)}</p>
       <p>Ended: {displayTimestamp(detail.endedAt)}</p>
+      {detail.recordingAvailable && (
+        <RecordingPlayer
+          key={detail.meetingId}
+          meetingId={detail.meetingId}
+          durationSeconds={detail.recordingDurationSeconds}
+          hasGaps={detail.audioHasGaps}
+        />
+      )}
       <MeetingTranslationPanel key={detail.meetingId} detail={detail} />
       <MeetingReviewPanel key={detail.meetingId} meetingId={detail.meetingId} />
     </article>

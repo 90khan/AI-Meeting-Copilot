@@ -65,7 +65,7 @@ mod tests {
     fn backend_playback_info_maps_to_the_safe_public_shape() {
         let meeting_id = "5c4029e9-e29a-4d52-b0e2-e28f94aec2d8";
         let backend = serde_json::from_str::<BackendPlaybackInfo>(&format!(
-            r#"{{"meeting_id":"{meeting_id}","format":"m4a","duration_seconds":12.5,"segment_count":3,"has_gaps":false}}"#
+            r#"{{"meeting_id":"{meeting_id}","format":"wav_pcm16_mono_16khz_segmented_v1","duration_seconds":12.5,"segment_count":3,"has_gaps":false}}"#
         ))
         .expect("backend payload is valid");
 
@@ -88,7 +88,7 @@ mod tests {
         assert!(RecordingPlaybackInfo::try_from(malformed).is_err());
 
         assert!(serde_json::from_str::<BackendPlaybackInfo>(
-            r#"{"meeting_id":"id","format":"m4a","duration_seconds":1.0,"segment_count":1,"has_gaps":false,"token":"secret"}"#
+            r#"{"meeting_id":"id","format":"wav_pcm16_mono_16khz_segmented_v1","duration_seconds":1.0,"segment_count":1,"has_gaps":false,"token":"secret"}"#
         )
         .is_err());
     }
@@ -110,7 +110,7 @@ impl TryFrom<BackendPlaybackInfo> for RecordingPlaybackInfo {
     type Error = ();
     fn try_from(value: BackendPlaybackInfo) -> Result<Self, Self::Error> {
         if value.meeting_id.is_empty()
-            || value.format != "m4a"
+            || value.format != "wav_pcm16_mono_16khz_segmented_v1"
             || value
                 .duration_seconds
                 .is_some_and(|v| !v.is_finite() || v < 0.0)

@@ -128,6 +128,39 @@ textarea {
   margin-top: 0;
 }
 
+.recording-player {
+  display: grid;
+  gap: 0.65rem;
+  margin-top: 1.5rem;
+  padding: 0.85rem 1rem;
+  border: 1px solid #d9e0ec;
+  border-radius: 0.5rem;
+  background: #fbfcfe;
+}
+
+.recording-player h4,
+.recording-player p {
+  margin: 0;
+}
+
+.playback-controls {
+  display: flex;
+  gap: 0.75rem;
+}
+
+.playback-gap {
+  color: #7a4b00;
+}
+
+.playback-time {
+  color: #4c5b75;
+  font-variant-numeric: tabular-nums;
+}
+
+.recording-player progress {
+  width: 100%;
+}
+
 .meeting-translation {
   display: grid;
   gap: 0.75rem;
