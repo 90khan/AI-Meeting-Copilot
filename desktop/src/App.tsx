@@ -38,6 +38,27 @@ const GENERIC_STATUS_ERROR = "The backend status is unavailable.";
 const GENERIC_START_ERROR = "The backend could not be started.";
 const GENERIC_STOP_ERROR = "The backend could not be stopped.";
 const GENERIC_CAPTURE_ERROR = "Audio capture is unavailable.";
+const LIVE_TRANSCRIPTION_CONNECT_STAGES = new Set([
+  "sidecar_connection",
+  "websocket_open",
+  "hello_serialize",
+  "hello_send",
+  "hello_ack_receive",
+  "hello_ack_parse",
+]);
+
+function connectionFailureMessage(error: unknown): string {
+  const message = typeof error === "string"
+    ? error
+    : error instanceof Error
+      ? error.message
+      : "";
+  const matched = /^The live transcription connection could not be established \(([^)]+)\)\.$/.exec(message);
+  const stage = matched?.[1];
+  return stage !== undefined && LIVE_TRANSCRIPTION_CONNECT_STAGES.has(stage)
+    ? `The live transcription connection could not be established (${stage}).`
+    : "The live transcription connection could not be established.";
+}
 
 function withoutStaleEndpoint(status: BackendStatus): BackendStatus {
   return status.status === "ready" ? status : { ...status, host: null, port: null };
@@ -246,8 +267,8 @@ export default function App() {
           : await connectLiveTranscription();
         setLiveStatus(connection);
         if (connection.status !== "connected") throw new Error("Session unavailable");
-      } catch {
-        setErrorMessage("The live transcription connection could not be established.");
+      } catch (error) {
+        setErrorMessage(connectionFailureMessage(error));
         return;
       }
 

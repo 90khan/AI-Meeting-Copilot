@@ -3,6 +3,7 @@
 #![allow(dead_code)] // Rust-only session and audio APIs are reserved for capture wiring.
 
 use std::{
+    fmt,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -41,6 +42,41 @@ type LocalWriter = futures_util::stream::SplitSink<LocalSocket, Message>;
 type LocalReader = futures_util::stream::SplitStream<LocalSocket>;
 type InboundMessage = Result<ServerMessage, LiveTranscriptionClientError>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LiveTranscriptionConnectStage {
+    SidecarConnection,
+    WebsocketOpen,
+    HelloSerialize,
+    HelloSend,
+    HelloAckReceive,
+    HelloAckParse,
+}
+
+impl LiveTranscriptionConnectStage {
+    const fn identifier(self) -> &'static str {
+        match self {
+            Self::SidecarConnection => "sidecar_connection",
+            Self::WebsocketOpen => "websocket_open",
+            Self::HelloSerialize => "hello_serialize",
+            Self::HelloSend => "hello_send",
+            Self::HelloAckReceive => "hello_ack_receive",
+            Self::HelloAckParse => "hello_ack_parse",
+        }
+    }
+}
+
+impl fmt::Display for LiveTranscriptionConnectStage {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.identifier())
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HelloAckFailure {
+    Receive,
+    Parse,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LiveTranscriptionLifecycleStatus {
@@ -71,6 +107,8 @@ pub enum LiveTranscriptionClientError {
     InvalidSequence,
     #[error("The live transcription connection failed.")]
     ConnectionFailed,
+    #[error("The live transcription connection could not be established ({0}).")]
+    ConnectionFailedAt(LiveTranscriptionConnectStage),
     #[error("The live transcription protocol failed.")]
     ProtocolFailed,
     #[error("The audio chunk timestamp is invalid.")]
@@ -123,6 +161,7 @@ struct ClientState {
     pending_end: Option<PendingEnd>,
     status: LiveTranscriptionLifecycleStatus,
     message: Option<String>,
+    connection_stage: Option<LiveTranscriptionConnectStage>,
     max_binary_payload_bytes: usize,
     session: Option<ActiveSession>,
 }
@@ -138,6 +177,7 @@ impl Default for ClientState {
             pending_end: None,
             status: LiveTranscriptionLifecycleStatus::Disconnected,
             message: None,
+            connection_stage: None,
             max_binary_payload_bytes: 0,
             session: None,
         }
@@ -184,14 +224,21 @@ impl LiveTranscriptionClient {
             }
             state.status = LiveTranscriptionLifecycleStatus::Connecting;
             state.message = None;
+            state.connection_stage = None;
         }
 
         let connection = match self.sidecar_manager.live_transcription_connection().await {
             Ok(connection) => connection,
-            Err(_) => return Err(self.mark_failed().await),
+            Err(_) => {
+                return Err(self
+                    .mark_connect_failed(LiveTranscriptionConnectStage::SidecarConnection)
+                    .await)
+            }
         };
         if connection.host != "127.0.0.1" || connection.port == 0 {
-            return Err(self.mark_failed().await);
+            return Err(self
+                .mark_connect_failed(LiveTranscriptionConnectStage::SidecarConnection)
+                .await);
         }
 
         let url = format!(
@@ -200,19 +247,38 @@ impl LiveTranscriptionClient {
         );
         let mut socket = match timeout(HANDSHAKE_TIMEOUT, connect_async(url)).await {
             Ok(Ok((socket, _))) => socket,
-            _ => return Err(self.mark_failed().await),
+            _ => {
+                return Err(self
+                    .mark_connect_failed(LiveTranscriptionConnectStage::WebsocketOpen)
+                    .await)
+            }
         };
         let hello = match serialize_hello(&connection.token, Uuid::new_v4()) {
             Ok(hello) => hello,
-            Err(_) => return Err(self.close_then_fail(socket).await),
+            Err(_) => {
+                return Err(self
+                    .close_then_fail(socket, LiveTranscriptionConnectStage::HelloSerialize)
+                    .await)
+            }
         };
         if socket.send(Message::Text(hello.into())).await.is_err() {
-            return Err(self.close_then_fail(socket).await);
+            return Err(self
+                .close_then_fail(socket, LiveTranscriptionConnectStage::HelloSend)
+                .await);
         }
 
-        let ack = match timeout(HANDSHAKE_TIMEOUT, receive_handshake(&mut socket)).await {
-            Ok(Ok(ServerMessage::HelloAck(ack))) => ack,
-            _ => return Err(self.close_then_fail(socket).await),
+        let ack = match timeout(HANDSHAKE_TIMEOUT, receive_hello_ack(&mut socket)).await {
+            Ok(Ok(ack)) => ack,
+            Ok(Err(HelloAckFailure::Receive)) | Err(_) => {
+                return Err(self
+                    .close_then_fail(socket, LiveTranscriptionConnectStage::HelloAckReceive)
+                    .await)
+            }
+            Ok(Err(HelloAckFailure::Parse)) => {
+                return Err(self
+                    .close_then_fail(socket, LiveTranscriptionConnectStage::HelloAckParse)
+                    .await)
+            }
         };
 
         let (writer, reader) = socket.split();
@@ -232,6 +298,7 @@ impl LiveTranscriptionClient {
         state.status = LiveTranscriptionLifecycleStatus::Connected;
         state.max_binary_payload_bytes = ack.max_binary_payload_bytes;
         state.message = None;
+        state.connection_stage = None;
         Ok(public_status(&state))
     }
 
@@ -727,9 +794,13 @@ impl LiveTranscriptionClient {
         }
     }
 
-    async fn close_then_fail(&self, mut socket: LocalSocket) -> LiveTranscriptionClientError {
+    async fn close_then_fail(
+        &self,
+        mut socket: LocalSocket,
+        stage: LiveTranscriptionConnectStage,
+    ) -> LiveTranscriptionClientError {
         let _ = socket.close(None).await;
-        self.mark_failed().await
+        self.mark_connect_failed(stage).await
     }
 
     async fn mark_failed(&self) -> LiveTranscriptionClientError {
@@ -737,6 +808,16 @@ impl LiveTranscriptionClient {
         fail_pending_operations(&mut state);
         mark_failed_state(&mut state);
         LiveTranscriptionClientError::ConnectionFailed
+    }
+
+    async fn mark_connect_failed(
+        &self,
+        stage: LiveTranscriptionConnectStage,
+    ) -> LiveTranscriptionClientError {
+        let mut state = self.state.lock().await;
+        fail_pending_operations(&mut state);
+        mark_connect_failed_state(&mut state, stage);
+        LiveTranscriptionClientError::ConnectionFailedAt(stage)
     }
 
     async fn clear_pending_start(&self, request_id: Uuid) {
@@ -1199,16 +1280,16 @@ pub async fn get_live_transcription_status(
     Ok(client.status().await)
 }
 
-async fn receive_handshake(
+async fn receive_hello_ack(
     socket: &mut LocalSocket,
-) -> Result<ServerMessage, LiveTranscriptionClientError> {
+) -> Result<super::protocol::HelloAck, HelloAckFailure> {
     match socket.next().await {
-        Some(Ok(Message::Text(text))) => {
-            parse_server_message(&text).map_err(|_| LiveTranscriptionClientError::ProtocolFailed)
-        }
-        Some(Ok(Message::Close(_))) | None => Err(LiveTranscriptionClientError::ConnectionFailed),
-        Some(Ok(_)) => Err(LiveTranscriptionClientError::ProtocolFailed),
-        Some(Err(_)) => Err(LiveTranscriptionClientError::ConnectionFailed),
+        Some(Ok(Message::Text(text))) => match parse_server_message(&text) {
+            Ok(ServerMessage::HelloAck(ack)) => Ok(ack),
+            Ok(_) | Err(_) => Err(HelloAckFailure::Parse),
+        },
+        Some(Ok(Message::Close(_))) | None | Some(Err(_)) => Err(HelloAckFailure::Receive),
+        Some(Ok(_)) => Err(HelloAckFailure::Parse),
     }
 }
 
@@ -1477,6 +1558,19 @@ fn mark_failed_state(state: &mut ClientState) {
     state.max_binary_payload_bytes = 0;
     state.status = LiveTranscriptionLifecycleStatus::Failed;
     state.message = Some("The live transcription connection failed.".to_owned());
+    state.connection_stage = None;
+}
+
+fn mark_connect_failed_state(state: &mut ClientState, stage: LiveTranscriptionConnectStage) {
+    state.writer = None;
+    state.session = None;
+    state.max_binary_payload_bytes = 0;
+    state.status = LiveTranscriptionLifecycleStatus::Failed;
+    state.message = Some(format!(
+        "The live transcription connection failed ({}).",
+        stage.identifier()
+    ));
+    state.connection_stage = Some(stage);
 }
 
 fn clear_disconnected(state: &mut ClientState) {
@@ -1485,6 +1579,7 @@ fn clear_disconnected(state: &mut ClientState) {
     state.max_binary_payload_bytes = 0;
     state.status = LiveTranscriptionLifecycleStatus::Disconnected;
     state.message = None;
+    state.connection_stage = None;
 }
 
 fn fail_pending_operations(state: &mut ClientState) {
@@ -1516,8 +1611,9 @@ fn public_status(state: &ClientState) -> LiveTranscriptionStatus {
 #[cfg(test)]
 mod tests {
     use super::{
-        clear_disconnected, dispatch_message, fail_pending_operations, mark_failed_state,
-        validate_chunk_admission, ActiveSession, ClientState, LiveTranscriptionClientError,
+        clear_disconnected, dispatch_message, fail_pending_operations, mark_connect_failed_state,
+        mark_failed_state, validate_chunk_admission, ActiveSession, ClientState,
+        LiveTranscriptionClientError, LiveTranscriptionConnectStage,
         LiveTranscriptionLifecycleStatus, LiveTranscriptionStatus, MeetingReviewArtifact,
         MeetingTranslationArtifact, PendingChunk, PendingEnd, PendingStart,
     };
@@ -1605,6 +1701,60 @@ mod tests {
         clear_disconnected(&mut state);
         assert_eq!(state.status, LiveTranscriptionLifecycleStatus::Disconnected);
         assert!(state.message.is_none());
+    }
+
+    #[test]
+    fn connection_failure_stages_are_allowlisted_and_redacted() {
+        let expected = [
+            (
+                LiveTranscriptionConnectStage::SidecarConnection,
+                "sidecar_connection",
+            ),
+            (
+                LiveTranscriptionConnectStage::WebsocketOpen,
+                "websocket_open",
+            ),
+            (
+                LiveTranscriptionConnectStage::HelloSerialize,
+                "hello_serialize",
+            ),
+            (LiveTranscriptionConnectStage::HelloSend, "hello_send"),
+            (
+                LiveTranscriptionConnectStage::HelloAckReceive,
+                "hello_ack_receive",
+            ),
+            (
+                LiveTranscriptionConnectStage::HelloAckParse,
+                "hello_ack_parse",
+            ),
+        ];
+
+        for (stage, identifier) in expected {
+            let error = LiveTranscriptionClientError::ConnectionFailedAt(stage);
+            let message = error.to_string();
+            assert_eq!(stage.identifier(), identifier);
+            assert_eq!(
+                message,
+                format!(
+                    "The live transcription connection could not be established ({identifier})."
+                )
+            );
+
+            let mut state = ClientState::default();
+            mark_connect_failed_state(&mut state, stage);
+            assert_eq!(state.connection_stage, Some(stage));
+            assert_eq!(
+                state.message,
+                Some(format!(
+                    "The live transcription connection failed ({identifier})."
+                ))
+            );
+
+            let diagnostic = format!("{error:?} {message}");
+            for forbidden in ["token", "ws://", "127.0.0.1", "payload", "secret-value"] {
+                assert!(!diagnostic.contains(forbidden));
+            }
+        }
     }
 
     #[test]
