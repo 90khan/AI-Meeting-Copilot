@@ -1,6 +1,7 @@
 """Internal immutable DTOs for trusted local recording playback."""
 
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from math import isfinite
 from uuid import UUID
 
@@ -16,6 +17,7 @@ class RecordingPlaybackInfo:
     recording_id: UUID
     meeting_id: MeetingId
     format: RecordingMediaFormat
+    capture_anchor_utc: datetime
     duration_seconds: float | None
     segment_count: int
     has_gaps: bool
@@ -26,6 +28,9 @@ class RecordingPlaybackInfo:
             or not isinstance(self.meeting_id, MeetingId)
             or not isinstance(self.format, RecordingMediaFormat)
             or not self.format.is_playback_supported
+            or not isinstance(self.capture_anchor_utc, datetime)
+            or self.capture_anchor_utc.tzinfo is None
+            or self.capture_anchor_utc.utcoffset() != timedelta(0)
             or type(self.segment_count) is not int
             or self.segment_count < 0
             or (

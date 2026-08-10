@@ -628,6 +628,7 @@ mod tests {
                 info: Some(RecordingPlaybackInfo {
                     meeting_id: meeting_id.to_string(),
                     format: "wav_pcm16_mono_16khz_segmented_v1".to_owned(),
+                    capture_anchor_utc: "2026-01-01T00:00:00Z".to_owned(),
                     duration_seconds: Some(1.0),
                     segment_count: 1,
                     has_gaps: false,

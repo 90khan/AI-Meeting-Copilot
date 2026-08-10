@@ -123,6 +123,7 @@ def test_completed_info_and_segments_stream_in_ascending_order(tmp_path: Path) -
 
     info, segments = asyncio.run(exercise())
     assert info.has_gaps is True
+    assert info.capture_anchor_utc == datetime(2026, 1, 1, tzinfo=UTC)
     assert [index for index, _ in segments] == [0, 2]
     assert [payload[:4] for _, payload in segments] == [b"RIFF", b"RIFF"]
     assert not list(tmp_path.rglob("*.m4a"))
@@ -158,6 +159,18 @@ def test_legacy_m4a_metadata_is_not_playable(tmp_path: Path) -> None:
         )
     )
     reader = asyncio.run(_reader(storage, keys, legacy))
+
+    with pytest.raises(RecordingPlaybackUnavailableError):
+        asyncio.run(reader.get_info(_MEETING_ID))
+
+
+def test_missing_capture_anchor_is_not_derived_for_playback_info(
+    tmp_path: Path,
+) -> None:
+    keys = _Keys()
+    storage = _storage(tmp_path, keys)
+    record = _record(metadata=replace(_record().metadata, capture_anchor_utc=None))
+    reader = asyncio.run(_reader(storage, keys, record))
 
     with pytest.raises(RecordingPlaybackUnavailableError):
         asyncio.run(reader.get_info(_MEETING_ID))

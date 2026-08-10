@@ -47,10 +47,13 @@ class EncryptedRecordingPlaybackReader:
         metadata = record.metadata
         if not metadata.container_format.is_playback_supported:
             raise RecordingPlaybackUnavailableError()
+        if metadata.capture_anchor_utc is None:
+            raise RecordingPlaybackUnavailableError()
         return RecordingPlaybackInfo(
             recording_id=metadata.recording_id,
             meeting_id=metadata.meeting_id,
             format=metadata.container_format,
+            capture_anchor_utc=metadata.capture_anchor_utc,
             duration_seconds=metadata.duration_seconds,
             segment_count=metadata.segment_count,
             has_gaps=metadata.has_gaps,

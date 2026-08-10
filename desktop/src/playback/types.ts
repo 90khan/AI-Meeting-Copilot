@@ -11,6 +11,7 @@ export type PlaybackState =
 export interface RecordingPlaybackInfo {
   meetingId: string;
   format: "wav_pcm16_mono_16khz_segmented_v1";
+  captureAnchorUtc: string;
   durationSeconds: number | null;
   segmentCount: number;
   hasGaps: boolean;
@@ -30,6 +31,7 @@ export interface PlaybackUiState {
   state: PlaybackState;
   meetingId: string | null;
   playbackGeneration: number | null;
+  captureAnchorUtc: string | null;
   durationSeconds: number | null;
   currentTimeSeconds: number;
   hasGaps: boolean;

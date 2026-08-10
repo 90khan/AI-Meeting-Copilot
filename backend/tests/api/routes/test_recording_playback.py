@@ -1,6 +1,7 @@
 """Tests for authenticated internal binary recording playback transport."""
 
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from uuid import UUID
 
@@ -45,6 +46,7 @@ class _Reader:
             recording_id=UUID(int=2),
             meeting_id=meeting_id,
             format=RecordingMediaFormat.WAV_PCM16_MONO_16KHZ_SEGMENTED_V1,
+            capture_anchor_utc=datetime(2026, 1, 1, tzinfo=UTC),
             duration_seconds=2.0,
             segment_count=2,
             has_gaps=True,
@@ -97,10 +99,12 @@ def test_info_and_stream_are_authenticated_and_ordered() -> None:
     assert set(info.json()) == {
         "meeting_id",
         "format",
+        "capture_anchor_utc",
         "duration_seconds",
         "segment_count",
         "has_gaps",
     }
+    assert info.json()["capture_anchor_utc"] == "2026-01-01T00:00:00Z"
     assert _frames(stream.content) == [
         (PLAYBACK_FRAME_AUDIO_SEGMENT, 2, b"two"),
         (PLAYBACK_FRAME_AUDIO_SEGMENT, 5, b"five"),

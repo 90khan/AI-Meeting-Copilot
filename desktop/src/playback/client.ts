@@ -7,9 +7,15 @@ function validInfo(value: unknown): value is RecordingPlaybackInfo {
   const info = value as Record<string, unknown>;
   return typeof info.meetingId === "string" &&
     info.format === "wav_pcm16_mono_16khz_segmented_v1" &&
+    typeof info.captureAnchorUtc === "string" && isCanonicalUtcTimestamp(info.captureAnchorUtc) &&
     (info.durationSeconds === null || (typeof info.durationSeconds === "number" && Number.isFinite(info.durationSeconds) && info.durationSeconds >= 0)) &&
     typeof info.segmentCount === "number" && Number.isInteger(info.segmentCount) && info.segmentCount >= 0 &&
     typeof info.hasGaps === "boolean";
+}
+
+function isCanonicalUtcTimestamp(value: string): boolean {
+  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/.test(value) &&
+    !Number.isNaN(Date.parse(value));
 }
 
 export async function prepareRecordingPlayback(meetingId: string): Promise<RecordingPlaybackInfo> {

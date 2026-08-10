@@ -125,7 +125,7 @@ export function RecordingPlayer({ meetingId, durationSeconds, hasGaps }: {
       const info = await prepareRecordingPlayback(meetingId);
       const generation = await startRecordingPlaybackStream();
       generationRef.current = generation;
-      update({ ...stateRef.current, state: "playing", meetingId, playbackGeneration: generation, durationSeconds: info.durationSeconds, hasGaps: info.hasGaps, currentTimeSeconds: 0, inputComplete: false, lastSegmentIndex: null });
+      update({ ...stateRef.current, state: "playing", meetingId, playbackGeneration: generation, durationSeconds: info.durationSeconds, captureAnchorUtc: info.captureAnchorUtc, hasGaps: info.hasGaps, currentTimeSeconds: 0, inputComplete: false, lastSegmentIndex: null });
       await activateRecordingPlaybackEvents(generation);
       tick();
     } catch { fail(); }

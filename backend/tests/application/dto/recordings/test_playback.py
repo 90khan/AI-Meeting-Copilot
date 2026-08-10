@@ -1,6 +1,7 @@
 """Tests for private immutable recording playback DTOs."""
 
 from dataclasses import FrozenInstanceError
+from datetime import UTC, datetime
 from uuid import UUID
 
 import pytest
@@ -18,6 +19,7 @@ def test_playback_info_is_private_safe_and_immutable() -> None:
         recording_id=UUID(int=1),
         meeting_id=MeetingId(UUID(int=2)),
         format=RecordingMediaFormat.WAV_PCM16_MONO_16KHZ_SEGMENTED_V1,
+        capture_anchor_utc=datetime(2026, 1, 1, tzinfo=UTC),
         duration_seconds=4.0,
         segment_count=2,
         has_gaps=True,
@@ -34,6 +36,17 @@ def test_playback_dtos_reject_invalid_values_and_redact_audio_repr() -> None:
             recording_id=UUID(int=1),
             meeting_id=MeetingId(UUID(int=2)),
             format=RecordingMediaFormat.LEGACY_M4A,
+            capture_anchor_utc=datetime(2026, 1, 1, tzinfo=UTC),
+            duration_seconds=None,
+            segment_count=0,
+            has_gaps=False,
+        )
+    with pytest.raises(ApplicationValidationError):
+        RecordingPlaybackInfo(
+            recording_id=UUID(int=1),
+            meeting_id=MeetingId(UUID(int=2)),
+            format=RecordingMediaFormat.WAV_PCM16_MONO_16KHZ_SEGMENTED_V1,
+            capture_anchor_utc=datetime(2026, 1, 1),
             duration_seconds=None,
             segment_count=0,
             has_gaps=False,

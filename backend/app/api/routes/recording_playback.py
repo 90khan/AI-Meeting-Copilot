@@ -32,6 +32,7 @@ MAX_PLAYBACK_FRAME_PAYLOAD_BYTES = 67_108_864
 class _PlaybackInfoResponse(BaseModel):
     meeting_id: UUID
     format: str
+    capture_anchor_utc: str
     duration_seconds: float | None
     segment_count: int
     has_gaps: bool
@@ -51,6 +52,7 @@ async def playback_info(
     return _PlaybackInfoResponse(
         meeting_id=info.meeting_id.value,
         format=info.format,
+        capture_anchor_utc=info.capture_anchor_utc.isoformat().replace("+00:00", "Z"),
         duration_seconds=info.duration_seconds,
         segment_count=info.segment_count,
         has_gaps=info.has_gaps,
