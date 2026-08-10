@@ -55,6 +55,16 @@ class _Timings:
             return None
         return max(matching, key=lambda item: item.segment_index)
 
+    async def list_for_recording(
+        self, recording_id: UUID
+    ) -> tuple[RecordingSegmentTiming, ...]:
+        return tuple(
+            sorted(
+                (item for item in self.timings if item.recording_id == recording_id),
+                key=lambda item: item.segment_index,
+            )
+        )
+
     async def save(self, timing: RecordingSegmentTiming) -> None:
         self.save_calls += 1
         self.events.append("timing.save")
@@ -104,6 +114,8 @@ class _StorageWriter:
 
     async def finalize(self) -> RecordingSegmentDescriptor:
         assert not self._storage.unit_of_work.active
+        if self._storage.fail_on_finalize:
+            raise RuntimeError("storage failed")
         self._storage.writes.append((self._index, self._data))
         self._storage.events.append("storage.write")
         return RecordingSegmentDescriptor(
@@ -125,6 +137,7 @@ class _Storage:
         self.unit_of_work = unit_of_work
         self.writes: list[tuple[int, bytes]] = []
         self.events = unit_of_work.recording_segment_timings.events
+        self.fail_on_finalize = False
 
     async def list_segments(
         self, recording_id: UUID
@@ -318,6 +331,82 @@ async def test_derives_sample_count_from_wav_and_commits_after_storage_write() -
 
 
 @pytest.mark.anyio
+async def test_short_middle_segment_uses_cumulative_persisted_sample_counts() -> None:
+    recordings = _Recordings(_record())
+    timings = _Timings()
+    unit_of_work = _UnitOfWork(recordings, timings)
+    storage = _Storage(unit_of_work)
+    use_case = WriteRecordingSegmentUseCase(lambda: unit_of_work, storage)
+
+    for segment_index, frame_count in enumerate((80_000, 32_000, 80_000)):
+        await use_case.execute(
+            WriteRecordingSegmentCommand(
+                recording_id=UUID(int=1),
+                segment_index=segment_index,
+                wav_bytes=_wav(frame_count),
+            )
+        )
+
+    assert [
+        (item.segment_index, item.sample_count, item.start_sample)
+        for item in timings.timings
+    ] == [
+        (0, 80_000, 0),
+        (1, 32_000, 80_000),
+        (2, 80_000, 112_000),
+    ]
+
+
+@pytest.mark.anyio
+async def test_rejects_storage_and_timing_state_disagreement() -> None:
+    recordings = _Recordings(_record())
+    timings = _Timings()
+    unit_of_work = _UnitOfWork(recordings, timings)
+    storage = _Storage(unit_of_work)
+    storage.writes.append((0, _wav(1)))
+    use_case = WriteRecordingSegmentUseCase(lambda: unit_of_work, storage)
+
+    with pytest.raises(RecordingSegmentLifecycleError):
+        await use_case.execute(
+            WriteRecordingSegmentCommand(
+                recording_id=UUID(int=1), segment_index=0, wav_bytes=_wav(1)
+            )
+        )
+
+    assert timings.timings == []
+    assert unit_of_work.commits == 0
+
+
+@pytest.mark.anyio
+async def test_rejects_a_noncontiguous_persisted_timing_sequence() -> None:
+    record = replace(_record(), current_segment_index=2)
+    recordings = _Recordings(record)
+    timings = _Timings(
+        (
+            RecordingSegmentTiming(
+                recording_id=UUID(int=1),
+                segment_index=1,
+                sample_count=80_000,
+                start_sample=80_000,
+            ),
+        )
+    )
+    unit_of_work = _UnitOfWork(recordings, timings)
+    storage = _Storage(unit_of_work)
+    storage.writes.extend(((0, _wav(80_000)), (1, _wav(80_000))))
+    use_case = WriteRecordingSegmentUseCase(lambda: unit_of_work, storage)
+
+    with pytest.raises(RecordingSegmentLifecycleError):
+        await use_case.execute(
+            WriteRecordingSegmentCommand(
+                recording_id=UUID(int=1), segment_index=2, wav_bytes=_wav(1)
+            )
+        )
+
+    assert storage.writes == [(0, _wav(80_000)), (1, _wav(80_000))]
+
+
+@pytest.mark.anyio
 async def test_timing_persistence_failure_compensates_the_completed_segment() -> None:
     recordings = _Recordings(_record())
     timings = _Timings(fail_on_save=True)
@@ -336,3 +425,24 @@ async def test_timing_persistence_failure_compensates_the_completed_segment() ->
     assert timings.timings == []
     assert unit_of_work.commits == 0
     assert timings.events == ["storage.write", "timing.save", "storage.delete"]
+
+
+@pytest.mark.anyio
+async def test_storage_failure_does_not_create_timing_or_expose_audio_content() -> None:
+    recordings = _Recordings(_record())
+    timings = _Timings()
+    unit_of_work = _UnitOfWork(recordings, timings)
+    storage = _Storage(unit_of_work)
+    storage.fail_on_finalize = True
+    use_case = WriteRecordingSegmentUseCase(lambda: unit_of_work, storage)
+
+    with pytest.raises(RuntimeError, match="storage failed") as error:
+        await use_case.execute(
+            WriteRecordingSegmentCommand(
+                recording_id=UUID(int=1), segment_index=0, wav_bytes=_wav(1)
+            )
+        )
+
+    assert timings.timings == []
+    assert unit_of_work.commits == 0
+    assert "RIFF" not in str(error.value)

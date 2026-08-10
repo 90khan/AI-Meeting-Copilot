@@ -1,5 +1,6 @@
 """Persist one validated WAV recording segment without retaining a database lock."""
 
+from contextlib import suppress
 from dataclasses import replace
 
 from app.application.dto.recordings import (
@@ -45,9 +46,10 @@ class WriteRecordingSegmentUseCase:
             )
             key_reference = RecordingKeyReference(value=record.key_reference)
             expected_metadata_index = record.current_segment_index
-            previous_timing = await unit_of_work.recording_segment_timings.get_last(
+            timings = await unit_of_work.recording_segment_timings.list_for_recording(
                 command.recording_id
             )
+            previous_timing = self._last_contiguous_timing(timings)
             expected_timing_index = self._expected_next_timing_index(previous_timing)
             if (
                 command.segment_index != expected_timing_index
@@ -85,11 +87,12 @@ class WriteRecordingSegmentUseCase:
                     current.metadata.state,
                     current.metadata.container_format,
                 )
-                current_last_timing = (
-                    await unit_of_work.recording_segment_timings.get_last(
+                current_timings = (
+                    await unit_of_work.recording_segment_timings.list_for_recording(
                         command.recording_id
                     )
                 )
+                current_last_timing = self._last_contiguous_timing(current_timings)
                 if (
                     current.current_segment_index != command.segment_index
                     or self._expected_next_timing_index(current_last_timing)
@@ -109,10 +112,11 @@ class WriteRecordingSegmentUseCase:
                 )
                 await unit_of_work.commit()
         except BaseException:
-            await self._recording_storage.delete_segment(
-                command.recording_id,
-                command.segment_index,
-            )
+            with suppress(Exception):
+                await self._recording_storage.delete_segment(
+                    command.recording_id,
+                    command.segment_index,
+                )
             raise
 
         return WriteRecordingSegmentResult(
@@ -147,3 +151,13 @@ class WriteRecordingSegmentUseCase:
     @staticmethod
     def _start_sample(previous: RecordingSegmentTiming | None) -> int:
         return 0 if previous is None else previous.start_sample + previous.sample_count
+
+    @staticmethod
+    def _last_contiguous_timing(
+        timings: tuple[RecordingSegmentTiming, ...],
+    ) -> RecordingSegmentTiming | None:
+        if tuple(timing.segment_index for timing in timings) != tuple(
+            range(len(timings))
+        ):
+            raise RecordingSegmentLifecycleError()
+        return timings[-1] if timings else None
