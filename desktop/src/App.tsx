@@ -239,24 +239,46 @@ export default function App() {
     setPendingOperation("start-session");
     setErrorMessage(null);
     try {
-      const connection = liveStatus?.status === "connected" || liveStatus?.status === "session_active"
-        ? liveStatus
-        : await connectLiveTranscription();
-      setLiveStatus(connection);
-      if (connection.status !== "connected") throw new Error("Session unavailable");
-      const meeting = await createMeeting(meetingName.trim());
-      await startMeeting(meeting.meetingId);
-      const session = await startLiveTranscriptionSession({
-        meetingId: meeting.meetingId,
-        languageHint: "de",
-        source: "mixed",
-        assistMode: assistSessionConfiguration,
-      });
-      setActiveMeetingId(meeting.meetingId);
-      setLiveStatus(session);
-      dispatchAssist({ type: "connection", status: "active" });
-    } catch {
-      setErrorMessage("The live session could not be started.");
+      let connection: LiveTranscriptionStatus;
+      try {
+        connection = liveStatus?.status === "connected" || liveStatus?.status === "session_active"
+          ? liveStatus
+          : await connectLiveTranscription();
+        setLiveStatus(connection);
+        if (connection.status !== "connected") throw new Error("Session unavailable");
+      } catch {
+        setErrorMessage("The live transcription connection could not be established.");
+        return;
+      }
+
+      let meeting: Awaited<ReturnType<typeof createMeeting>>;
+      try {
+        meeting = await createMeeting(meetingName.trim());
+      } catch {
+        setErrorMessage("The Meeting could not be created.");
+        return;
+      }
+
+      try {
+        await startMeeting(meeting.meetingId);
+      } catch {
+        setErrorMessage("The Meeting could not be started.");
+        return;
+      }
+
+      try {
+        const session = await startLiveTranscriptionSession({
+          meetingId: meeting.meetingId,
+          languageHint: "de",
+          source: "mixed",
+          assistMode: assistSessionConfiguration,
+        });
+        setActiveMeetingId(meeting.meetingId);
+        setLiveStatus(session);
+        dispatchAssist({ type: "connection", status: "active" });
+      } catch {
+        setErrorMessage("The live transcription session could not be started.");
+      }
     } finally {
       setPendingOperation(null);
     }
