@@ -135,6 +135,15 @@ class EncryptedRecordingStorage:
         await self._ensure_configured(recording_id)
         shutil.rmtree(self._directory(recording_id), ignore_errors=True)
 
+    async def delete_segment(self, recording_id: UUID, segment_index: int) -> None:
+        """Remove one completed segment for failed write compensation only."""
+
+        await self._ensure_configured(recording_id)
+        if segment_index < 0:
+            raise RecordingSegmentLifecycleError()
+        path = self._directory(recording_id) / f"segment-{segment_index:06d}.amcr"
+        path.unlink(missing_ok=True)
+
     async def recording_exists(self, recording_id: UUID) -> bool:
         await self._ensure_configured(recording_id)
         return self._directory(recording_id).is_dir()

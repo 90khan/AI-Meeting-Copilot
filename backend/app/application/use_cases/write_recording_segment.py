@@ -6,6 +6,7 @@ from app.application.dto.recordings import (
     RecordingKeyReference,
     RecordingMediaFormat,
     RecordingSegmentDescriptor,
+    RecordingSegmentTiming,
     RecordingState,
     WriteRecordingSegmentCommand,
     WriteRecordingSegmentResult,
@@ -13,6 +14,7 @@ from app.application.dto.recordings import (
 from app.application.exceptions import RecordingSegmentLifecycleError
 from app.application.interfaces import RecordingStorage, UnitOfWorkFactory
 from app.domain.exceptions import InvalidStateTransitionError
+from app.infrastructure.recordings import validate_wav_recording_segment
 
 
 class WriteRecordingSegmentUseCase:
@@ -31,6 +33,8 @@ class WriteRecordingSegmentUseCase:
     ) -> WriteRecordingSegmentResult:
         """Persist one segment in short database phases around external I/O."""
 
+        sample_count = validate_wav_recording_segment(command.wav_bytes)
+
         async with self._unit_of_work_factory() as unit_of_work:
             record = await unit_of_work.recordings.get_by_id(command.recording_id)
             if record is None:
@@ -41,6 +45,16 @@ class WriteRecordingSegmentUseCase:
             )
             key_reference = RecordingKeyReference(value=record.key_reference)
             expected_metadata_index = record.current_segment_index
+            previous_timing = await unit_of_work.recording_segment_timings.get_last(
+                command.recording_id
+            )
+            expected_timing_index = self._expected_next_timing_index(previous_timing)
+            if (
+                command.segment_index != expected_timing_index
+                or expected_metadata_index != expected_timing_index
+            ):
+                raise RecordingSegmentLifecycleError()
+            start_sample = self._start_sample(previous_timing)
 
         segments = await self._recording_storage.list_segments(command.recording_id)
         expected_index = self._expected_next_index(segments)
@@ -62,20 +76,44 @@ class WriteRecordingSegmentUseCase:
             await writer.abort()
             raise
 
-        async with self._unit_of_work_factory() as unit_of_work:
-            current = await unit_of_work.recordings.get_by_id(command.recording_id)
-            if current is None:
-                raise LookupError("Recording not found")
-            self._validate_recording(
-                current.metadata.state,
-                current.metadata.container_format,
+        try:
+            async with self._unit_of_work_factory() as unit_of_work:
+                current = await unit_of_work.recordings.get_by_id(command.recording_id)
+                if current is None:
+                    raise LookupError("Recording not found")
+                self._validate_recording(
+                    current.metadata.state,
+                    current.metadata.container_format,
+                )
+                current_last_timing = (
+                    await unit_of_work.recording_segment_timings.get_last(
+                        command.recording_id
+                    )
+                )
+                if (
+                    current.current_segment_index != command.segment_index
+                    or self._expected_next_timing_index(current_last_timing)
+                    != command.segment_index
+                ):
+                    raise RecordingSegmentLifecycleError()
+                await unit_of_work.recordings.save(
+                    replace(current, current_segment_index=command.segment_index + 1)
+                )
+                await unit_of_work.recording_segment_timings.save(
+                    RecordingSegmentTiming(
+                        recording_id=command.recording_id,
+                        segment_index=command.segment_index,
+                        sample_count=sample_count,
+                        start_sample=start_sample,
+                    )
+                )
+                await unit_of_work.commit()
+        except BaseException:
+            await self._recording_storage.delete_segment(
+                command.recording_id,
+                command.segment_index,
             )
-            if current.current_segment_index != command.segment_index:
-                raise RecordingSegmentLifecycleError()
-            await unit_of_work.recordings.save(
-                replace(current, current_segment_index=command.segment_index + 1)
-            )
-            await unit_of_work.commit()
+            raise
 
         return WriteRecordingSegmentResult(
             recording_id=command.recording_id,
@@ -101,3 +139,11 @@ class WriteRecordingSegmentUseCase:
         if indexes != tuple(range(len(indexes))):
             raise RecordingSegmentLifecycleError()
         return len(indexes)
+
+    @staticmethod
+    def _expected_next_timing_index(previous: RecordingSegmentTiming | None) -> int:
+        return 0 if previous is None else previous.segment_index + 1
+
+    @staticmethod
+    def _start_sample(previous: RecordingSegmentTiming | None) -> int:
+        return 0 if previous is None else previous.start_sample + previous.sample_count

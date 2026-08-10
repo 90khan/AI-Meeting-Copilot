@@ -15,8 +15,8 @@ _BLOCK_ALIGNMENT = 2
 _BYTE_RATE = 32_000
 
 
-def validate_wav_recording_segment(data: bytes) -> None:
-    """Validate one complete V1 WAV segment without decoding its samples.
+def validate_wav_recording_segment(data: bytes) -> int:
+    """Validate one complete V1 WAV segment and return its PCM frame count.
 
     Segments are independent, five-second-target WAV files (with a permitted
     shorter final segment), never overlapping transcription chunks.
@@ -60,6 +60,7 @@ def validate_wav_recording_segment(data: bytes) -> None:
         block_alignment,
         bits_per_sample,
     ) = _PCM_FORMAT.unpack(format_chunk)
+    block_alignment = int(block_alignment)
     if (
         format_code != 1
         or channels != _CHANNELS
@@ -71,3 +72,5 @@ def validate_wav_recording_segment(data: bytes) -> None:
         or len(data_chunk) % block_alignment != 0
     ):
         raise RecordingSegmentCorruptError()
+
+    return len(data_chunk) // block_alignment
