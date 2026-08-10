@@ -17,6 +17,9 @@ from app.application.dto.recordings import (
     RecordingMediaFormat,
     RecordingPlaybackInfo,
     RecordingPlaybackSegment,
+    RecordingSeekResolution,
+    RecordingSeekTarget,
+    ResolveRecordingSeekCommand,
 )
 from app.application.exceptions import RecordingPlaybackUnavailableError
 from app.domain.value_objects import MeetingId
@@ -61,6 +64,39 @@ class _Reader:
             raise RecordingPlaybackUnavailableError("private path")
         yield RecordingPlaybackSegment(segment_index=5, plaintext_audio=b"five")
 
+    async def read_segments_from(
+        self,
+        meeting_id: MeetingId,
+        *,
+        start_segment: int,
+    ) -> AsyncIterator[RecordingPlaybackSegment]:
+        async for segment in self.read_segments(meeting_id):
+            if segment.segment_index >= start_segment:
+                yield segment
+
+
+class _Resolver:
+    async def execute(
+        self,
+        command: ResolveRecordingSeekCommand,
+    ) -> RecordingSeekResolution:
+        if command.target_seconds == 2.0:
+            return RecordingSeekResolution(
+                at_end=False,
+                target=RecordingSeekTarget(
+                    recording_id=UUID(int=2),
+                    segment_index=5,
+                    segment_start_sample=80_000,
+                    segment_sample_count=32_000,
+                    target_sample=96_000,
+                    offset_samples=16_000,
+                    resolved_seconds=6.0,
+                ),
+            )
+        if command.target_seconds == 10.0:
+            return RecordingSeekResolution(at_end=True, target=None)
+        raise RecordingPlaybackUnavailableError()
+
 
 def _client(reader: _Reader) -> TestClient:
     app = FastAPI()
@@ -68,6 +104,7 @@ def _client(reader: _Reader) -> TestClient:
     app.state.container = SimpleNamespace(
         get_sidecar_token_validator=lambda: _Validator(),
         get_recording_playback_reader=lambda: reader,
+        get_resolve_recording_seek_use_case=lambda: _Resolver(),
     )
     return TestClient(app)
 
@@ -128,3 +165,37 @@ def test_invalid_token_and_unavailable_or_failed_playback_are_safe() -> None:
         (PLAYBACK_FRAME_AUDIO_SEGMENT, 2, b"two"),
         (PLAYBACK_FRAME_ERROR, 0, b""),
     ]
+
+
+def test_seek_and_start_segment_are_authenticated_and_privacy_safe() -> None:
+    client = _client(_Reader())
+    headers = {"x-ai-meeting-copilot-token": "token"}
+    prefix = f"/api/v1/internal/recordings/{_MEETING_ID}"
+
+    seek = client.get(f"{prefix}/seek?target_seconds=2.0", headers=headers)
+    at_end = client.get(f"{prefix}/seek?target_seconds=10.0", headers=headers)
+    stream = client.get(f"{prefix}/playback-stream?start_segment=5", headers=headers)
+    invalid = client.get(f"{prefix}/playback-stream?start_segment=-1", headers=headers)
+    missing_token = client.get(f"{prefix}/seek?target_seconds=2.0")
+
+    assert seek.status_code == at_end.status_code == stream.status_code == 200
+    assert seek.json() == {
+        "at_end": False,
+        "target": {
+            "segment_index": 5,
+            "segment_start_sample": 80_000,
+            "segment_sample_count": 32_000,
+            "target_sample": 96_000,
+            "offset_samples": 16_000,
+            "resolved_seconds": 6.0,
+        },
+    }
+    assert at_end.json() == {"at_end": True, "target": None}
+    assert _frames(stream.content) == [
+        (PLAYBACK_FRAME_AUDIO_SEGMENT, 5, b"five"),
+        (PLAYBACK_FRAME_END, 0, b""),
+    ]
+    assert invalid.status_code == 422
+    assert missing_token.status_code == 401
+    assert "token" not in seek.text
+    assert "path" not in seek.text

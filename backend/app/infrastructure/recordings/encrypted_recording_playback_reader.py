@@ -65,6 +65,20 @@ class EncryptedRecordingPlaybackReader:
     ) -> AsyncIterator[RecordingPlaybackSegment]:
         """Decrypt and yield stored segments in ascending index order."""
 
+        async for segment in self.read_segments_from(meeting_id, start_segment=0):
+            yield segment
+
+    async def read_segments_from(
+        self,
+        meeting_id: MeetingId,
+        *,
+        start_segment: int,
+    ) -> AsyncIterator[RecordingPlaybackSegment]:
+        """Decrypt only completed segments at or after ``start_segment``."""
+
+        if start_segment < 0:
+            raise RecordingPlaybackUnavailableError()
+
         record = await self._resolve_record(meeting_id)
         reference = RecordingKeyReference(value=record.key_reference)
         if not record.metadata.container_format.is_playback_supported:
@@ -83,7 +97,17 @@ class EncryptedRecordingPlaybackReader:
         if len({item.segment_index for item in ordered}) != len(ordered):
             raise RecordingPlaybackUnavailableError()
 
+        first_returned = True
         for descriptor in ordered:
+            if descriptor.segment_index < start_segment:
+                continue
+            if (
+                first_returned
+                and start_segment != 0
+                and descriptor.segment_index != start_segment
+            ):
+                raise RecordingPlaybackUnavailableError()
+            first_returned = False
             try:
                 plaintext = await self._recording_storage.read_segment(
                     record.metadata.recording_id,

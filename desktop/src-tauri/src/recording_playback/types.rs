@@ -32,6 +32,15 @@ pub struct RecordingPlaybackStatus {
     pub info: Option<RecordingPlaybackInfo>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordingPlaybackSeekResult {
+    pub at_end: bool,
+    pub segment_index: Option<u32>,
+    pub offset_samples: Option<u32>,
+    pub resolved_seconds: Option<f64>,
+}
+
 /// Plaintext audio is intentionally an internal, non-serializable boundary.
 pub(crate) struct PlaybackAudioChunk {
     pub(crate) segment_index: u32,
@@ -57,6 +66,47 @@ pub(crate) struct BackendPlaybackInfo {
     pub(crate) duration_seconds: Option<f64>,
     pub(crate) segment_count: usize,
     pub(crate) has_gaps: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) struct BackendPlaybackSeekTarget {
+    pub(crate) segment_index: u32,
+    pub(crate) offset_samples: u32,
+    pub(crate) resolved_seconds: f64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) struct BackendPlaybackSeekResolution {
+    pub(crate) at_end: bool,
+    pub(crate) target: Option<BackendPlaybackSeekTarget>,
+}
+
+impl TryFrom<BackendPlaybackSeekResolution> for RecordingPlaybackSeekResult {
+    type Error = ();
+
+    fn try_from(value: BackendPlaybackSeekResolution) -> Result<Self, Self::Error> {
+        match (value.at_end, value.target) {
+            (true, None) => Ok(Self {
+                at_end: true,
+                segment_index: None,
+                offset_samples: None,
+                resolved_seconds: None,
+            }),
+            (false, Some(target))
+                if target.resolved_seconds.is_finite() && target.resolved_seconds >= 0.0 =>
+            {
+                Ok(Self {
+                    at_end: false,
+                    segment_index: Some(target.segment_index),
+                    offset_samples: Some(target.offset_samples),
+                    resolved_seconds: Some(target.resolved_seconds),
+                })
+            }
+            _ => Err(()),
+        }
+    }
 }
 
 #[cfg(test)]

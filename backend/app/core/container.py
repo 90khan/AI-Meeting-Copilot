@@ -58,6 +58,7 @@ from app.application.use_cases import (
     ProcessLiveAudioChunkUseCase,
     ReconcileRecordingStorageUseCase,
     RenameMeetingUseCase,
+    ResolveRecordingSeekUseCase,
     SimplifyTranscriptSegmentUseCase,
     StartLiveTranscriptionSessionUseCase,
     StartMeetingUseCase,
@@ -389,6 +390,12 @@ class Container:
 
         self._require_started()
         return FinalizeRecordingUseCase(self.get_unit_of_work)
+
+    def get_resolve_recording_seek_use_case(self) -> ResolveRecordingSeekUseCase:
+        """Create one safe recording seek resolver for this active lifecycle."""
+
+        self._require_started()
+        return ResolveRecordingSeekUseCase(self.get_unit_of_work)
 
     def get_mark_recording_failed_use_case(self) -> MarkRecordingFailedUseCase:
         """Create one privacy-safe recording-failure use case."""

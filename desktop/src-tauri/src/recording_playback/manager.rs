@@ -11,8 +11,8 @@ use super::protocol::{
     PlaybackFrame, PlaybackFrameDecoder, PlaybackFrameKind, PlaybackProtocolError,
 };
 use super::types::{
-    BackendPlaybackInfo, PlaybackAudioChunk, RecordingPlaybackInfo, RecordingPlaybackState,
-    RecordingPlaybackStatus,
+    BackendPlaybackInfo, BackendPlaybackSeekResolution, PlaybackAudioChunk, RecordingPlaybackInfo,
+    RecordingPlaybackSeekResult, RecordingPlaybackState, RecordingPlaybackStatus,
 };
 use crate::sidecar::manager::SidecarManager;
 
@@ -192,6 +192,10 @@ impl RecordingPlaybackManager {
     /// Opens a fresh, authenticated stream for the prepared recording. The
     /// receiver is deliberately internal until the player transport exists.
     pub async fn start_streaming(&self) -> Result<u64, ()> {
+        self.start_streaming_from(0).await
+    }
+
+    async fn start_streaming_from(&self, start_segment: u32) -> Result<u64, ()> {
         let meeting_id = {
             let mut state = self.state.lock().await;
             if state.state != RecordingPlaybackState::Ready || state.stream_task.is_some() {
@@ -231,7 +235,8 @@ impl RecordingPlaybackManager {
             if launch_receiver.await.is_err() {
                 return;
             }
-            let result = consume_playback_stream(connection, meeting_id, sender).await;
+            let result =
+                consume_playback_stream(connection, meeting_id, start_segment, sender).await;
             finish_stream(state, generation, result).await;
         });
         let mut state = self.state.lock().await;
@@ -244,6 +249,56 @@ impl RecordingPlaybackManager {
         drop(state);
         let _ = launch_sender.send(());
         Ok(generation)
+    }
+
+    /// Resolve a target through the sidecar, then restart only from its containing segment.
+    pub async fn seek(&self, target_seconds: f64) -> Result<RecordingPlaybackSeekResult, ()> {
+        if !target_seconds.is_finite() || target_seconds < 0.0 {
+            return Err(());
+        }
+        let meeting_id = {
+            let state = self.state.lock().await;
+            if !matches!(
+                state.state,
+                RecordingPlaybackState::Ready | RecordingPlaybackState::Streaming
+            ) {
+                return Err(());
+            }
+            state.meeting_id.ok_or(())?
+        };
+        let result = self.fetch_seek(meeting_id, target_seconds).await?;
+        self.stop_active_stream().await;
+        if result.at_end {
+            return Ok(result);
+        }
+        let start_segment = result.segment_index.ok_or(())?;
+        self.start_streaming_from(start_segment).await?;
+        Ok(result)
+    }
+
+    async fn stop_active_stream(&self) {
+        let (task, event_task, receiver) = {
+            let mut state = self.state.lock().await;
+            state.stream_generation = state.stream_generation.wrapping_add(1);
+            let task = state.stream_task.take();
+            let event_task = state.event_task.take();
+            let receiver = state.audio_receiver.take();
+            if state.meeting_id.is_some() {
+                state.state = RecordingPlaybackState::Ready;
+            }
+            (task, event_task, receiver)
+        };
+        if let Some(task) = task {
+            task.abort();
+            let _ = task.await;
+        }
+        if let Some(task) = event_task {
+            task.abort();
+            let _ = task.await;
+        }
+        if let Some(receiver) = receiver {
+            clear_buffered_audio(&receiver).await;
+        }
     }
 
     /// Activates the Tauri event pump only after its opaque generation has
@@ -316,6 +371,35 @@ impl RecordingPlaybackManager {
             return Err(());
         }
         Ok(info)
+    }
+
+    async fn fetch_seek(
+        &self,
+        meeting_id: Uuid,
+        target_seconds: f64,
+    ) -> Result<RecordingPlaybackSeekResult, ()> {
+        let connection = self
+            .sidecar
+            .live_transcription_connection()
+            .await
+            .map_err(|_| ())?;
+        let response = reqwest::Client::new()
+            .get(format!(
+                "http://{}:{}/api/v1/internal/recordings/{meeting_id}/seek",
+                connection.host, connection.port
+            ))
+            .query(&[("target_seconds", target_seconds)])
+            .header("x-ai-meeting-copilot-token", connection.token)
+            .send()
+            .await
+            .map_err(|_| ())?;
+        if response.status() != StatusCode::OK {
+            return Err(());
+        }
+        let body = response.text().await.map_err(|_| ())?;
+        let response =
+            serde_json::from_str::<BackendPlaybackSeekResolution>(&body).map_err(|_| ())?;
+        RecordingPlaybackSeekResult::try_from(response).map_err(|_| ())
     }
 }
 
@@ -411,11 +495,12 @@ async fn fail_event_delivery(state: Arc<Mutex<PlaybackState>>, generation: u64) 
 async fn consume_playback_stream(
     connection: crate::sidecar::manager::SidecarConnection,
     meeting_id: Uuid,
+    start_segment: u32,
     sender: mpsc::Sender<PlaybackAudioChunk>,
 ) -> Result<(), PlaybackProtocolError> {
     let response = reqwest::Client::new()
         .get(format!(
-            "http://{}:{}/api/v1/internal/recordings/{meeting_id}/playback-stream",
+            "http://{}:{}/api/v1/internal/recordings/{meeting_id}/playback-stream?start_segment={start_segment}",
             connection.host, connection.port
         ))
         .header("x-ai-meeting-copilot-token", connection.token)
@@ -427,7 +512,7 @@ async fn consume_playback_stream(
     }
     let mut response = response;
     let mut decoder = PlaybackFrameDecoder::new();
-    let mut previous_index = None;
+    let mut previous_index = start_segment.checked_sub(1);
     loop {
         let bytes = response.chunk().await.map_err(|_| PlaybackProtocolError)?;
         let Some(bytes) = bytes else {
@@ -910,6 +995,14 @@ pub async fn start_recording_playback_stream(
         .start_streaming()
         .await
         .map_err(|_| "Playback is unavailable.".to_owned())
+}
+
+#[tauri::command]
+pub async fn seek_recording_playback(
+    target_seconds: f64,
+    manager: State<'_, RecordingPlaybackManager>,
+) -> Result<RecordingPlaybackSeekResult, ()> {
+    manager.seek(target_seconds).await
 }
 #[tauri::command]
 pub async fn activate_recording_playback_events(

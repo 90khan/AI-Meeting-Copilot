@@ -10,7 +10,9 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from app.application.dto.recordings import ResolveRecordingSeekCommand
 from app.application.exceptions import (
+    ApplicationValidationError,
     ProviderAuthenticationError,
     RecordingPlaybackUnavailableError,
 )
@@ -38,6 +40,20 @@ class _PlaybackInfoResponse(BaseModel):
     has_gaps: bool
 
 
+class _SeekTargetResponse(BaseModel):
+    segment_index: int
+    segment_start_sample: int
+    segment_sample_count: int
+    target_sample: int
+    offset_samples: int
+    resolved_seconds: float
+
+
+class _SeekResponse(BaseModel):
+    at_end: bool
+    target: _SeekTargetResponse | None
+
+
 @router.get("/{meeting_id}/playback-info", response_model=_PlaybackInfoResponse)
 async def playback_info(
     meeting_id: UUID, request: Request, x_ai_meeting_copilot_token: str = Header("")
@@ -61,14 +77,22 @@ async def playback_info(
 
 @router.get("/{meeting_id}/playback-stream")
 async def playback_stream(
-    meeting_id: UUID, request: Request, x_ai_meeting_copilot_token: str = Header("")
+    meeting_id: UUID,
+    request: Request,
+    start_segment: int = 0,
+    x_ai_meeting_copilot_token: str = Header(""),
 ) -> StreamingResponse:
     container = _authenticate(request, x_ai_meeting_copilot_token)
+    if start_segment < 0:
+        raise HTTPException(422, "Playback is unavailable.")
     reader = container.get_recording_playback_reader()
 
     async def frames() -> AsyncIterator[bytes]:
         try:
-            async for segment in reader.read_segments(MeetingId(meeting_id)):
+            async for segment in reader.read_segments_from(
+                MeetingId(meeting_id),
+                start_segment=start_segment,
+            ):
                 if await request.is_disconnected():
                     return
                 payload_length = len(segment.plaintext_audio)
@@ -92,6 +116,41 @@ async def playback_stream(
             return
 
     return StreamingResponse(frames(), media_type="application/octet-stream")
+
+
+@router.get("/{meeting_id}/seek", response_model=_SeekResponse)
+async def resolve_seek(
+    meeting_id: UUID,
+    target_seconds: float,
+    request: Request,
+    x_ai_meeting_copilot_token: str = Header(""),
+) -> _SeekResponse:
+    """Resolve a trusted playback target without opening or decrypting audio."""
+
+    container = _authenticate(request, x_ai_meeting_copilot_token)
+    try:
+        resolution = await container.get_resolve_recording_seek_use_case().execute(
+            ResolveRecordingSeekCommand(
+                meeting_id=MeetingId(meeting_id),
+                target_seconds=target_seconds,
+            )
+        )
+    except (ApplicationValidationError, RecordingPlaybackUnavailableError) as error:
+        raise HTTPException(422, "Playback is unavailable.") from error
+    if resolution.target is None:
+        return _SeekResponse(at_end=True, target=None)
+    target = resolution.target
+    return _SeekResponse(
+        at_end=False,
+        target=_SeekTargetResponse(
+            segment_index=target.segment_index,
+            segment_start_sample=target.segment_start_sample,
+            segment_sample_count=target.segment_sample_count,
+            target_sample=target.target_sample,
+            offset_samples=target.offset_samples,
+            resolved_seconds=target.resolved_seconds,
+        ),
+    )
 
 
 def _authenticate(request: Request, token: str) -> Container:
