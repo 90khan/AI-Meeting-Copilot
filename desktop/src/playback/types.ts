@@ -17,6 +17,15 @@ export interface RecordingPlaybackInfo {
   hasGaps: boolean;
 }
 
+/** Safe result of a backend-resolved playback seek. */
+export interface RecordingPlaybackSeekResult {
+  atEnd: boolean;
+  generation: number | null;
+  resolvedSeconds: number | null;
+  segmentIndex: number | null;
+  offsetSamples: number | null;
+}
+
 export interface PlaybackChunkEvent {
   generation: number;
   segmentIndex: number;

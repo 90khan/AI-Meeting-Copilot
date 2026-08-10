@@ -266,13 +266,13 @@ impl RecordingPlaybackManager {
             }
             state.meeting_id.ok_or(())?
         };
-        let result = self.fetch_seek(meeting_id, target_seconds).await?;
+        let mut result = self.fetch_seek(meeting_id, target_seconds).await?;
         self.stop_active_stream().await;
         if result.at_end {
             return Ok(result);
         }
         let start_segment = result.segment_index.ok_or(())?;
-        self.start_streaming_from(start_segment).await?;
+        result.generation = Some(self.start_streaming_from(start_segment).await?);
         Ok(result)
     }
 

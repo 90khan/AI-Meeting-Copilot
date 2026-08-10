@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 
-import type { RecordingPlaybackInfo } from "./types";
+import type { RecordingPlaybackInfo, RecordingPlaybackSeekResult } from "./types";
 
 function validInfo(value: unknown): value is RecordingPlaybackInfo {
   if (value === null || typeof value !== "object") return false;
@@ -35,6 +35,34 @@ export async function startRecordingPlaybackStream(): Promise<number> {
     const generation = await invoke<unknown>("start_recording_playback_stream");
     if (typeof generation !== "number" || !Number.isSafeInteger(generation) || generation < 0) throw new Error();
     return generation;
+  } catch {
+    throw new Error("Playback is unavailable.");
+  }
+}
+
+function validSeekResult(value: unknown): value is RecordingPlaybackSeekResult {
+  if (value === null || typeof value !== "object") return false;
+  const result = value as Record<string, unknown>;
+  const generation = result.generation;
+  const segmentIndex = result.segmentIndex;
+  const offsetSamples = result.offsetSamples;
+  const resolvedSeconds = result.resolvedSeconds;
+  if (typeof result.atEnd !== "boolean") return false;
+  if (result.atEnd) {
+    return generation === null && segmentIndex === null && offsetSamples === null && resolvedSeconds === null;
+  }
+  return typeof generation === "number" && Number.isSafeInteger(generation) && generation >= 0 &&
+    typeof segmentIndex === "number" && Number.isSafeInteger(segmentIndex) && segmentIndex >= 0 &&
+    typeof offsetSamples === "number" && Number.isSafeInteger(offsetSamples) && offsetSamples >= 0 &&
+    typeof resolvedSeconds === "number" && Number.isFinite(resolvedSeconds) && resolvedSeconds >= 0;
+}
+
+export async function seekRecordingPlayback(targetSeconds: number): Promise<RecordingPlaybackSeekResult> {
+  if (!Number.isFinite(targetSeconds) || targetSeconds < 0) throw new Error("Playback is unavailable.");
+  try {
+    const result = await invoke<unknown>("seek_recording_playback", { targetSeconds });
+    if (!validSeekResult(result)) throw new Error();
+    return result;
   } catch {
     throw new Error("Playback is unavailable.");
   }

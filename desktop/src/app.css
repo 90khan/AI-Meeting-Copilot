@@ -157,7 +157,7 @@ textarea {
   font-variant-numeric: tabular-nums;
 }
 
-.recording-player progress {
+.playback-progress {
   width: 100%;
 }
 
@@ -252,6 +252,20 @@ textarea {
 .meeting-transcript-row.transcript-row--active {
   border-left: 0.25rem solid #254b83;
   background: #e8f0ff;
+}
+
+.meeting-transcript-row--seekable {
+  cursor: pointer;
+}
+
+.meeting-transcript-row--seekable:hover,
+.meeting-transcript-row--seekable:focus-visible {
+  outline: none;
+  background: #eef4ff;
+}
+
+.meeting-transcript-row--seekable:focus-visible {
+  box-shadow: inset 0 0 0 0.15rem #254b83;
 }
 
 .meeting-transcript-row header {

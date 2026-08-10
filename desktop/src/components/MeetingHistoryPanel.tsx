@@ -11,7 +11,7 @@ import type { MeetingTranslationArtifact } from "../history/translationTypes";
 import { buildTranscriptTimeline, findActiveTranscriptId } from "../playback/transcriptSync";
 import type { PlaybackState } from "../playback/types";
 import { MeetingReviewPanel } from "./MeetingReviewPanel";
-import { RecordingPlayer } from "./RecordingPlayer";
+import { RecordingPlayer, type RecordingPlayerHandle } from "./RecordingPlayer";
 
 const HISTORY_LIMIT = 100;
 
@@ -150,6 +150,7 @@ function MeetingDetailPanel({
 }
 
 function MeetingDetailContent({ detail }: { detail: MeetingDetail }) {
+  const playbackRef = useRef<RecordingPlayerHandle>(null);
   const [timing, setTiming] = useState<{ captureAnchorUtc: string; hasGaps: boolean } | null>(null);
   const [positionSeconds, setPositionSeconds] = useState(0);
   const [syncActive, setSyncActive] = useState(false);
@@ -166,6 +167,19 @@ function MeetingDetailContent({ detail }: { detail: MeetingDetail }) {
     [positionSeconds, syncActive, timeline],
   );
   const synchronizationUnavailable = detail.audioHasGaps || timing?.hasGaps === true || (timing !== null && timeline === null);
+  const timelineByTranscriptId = useMemo(
+    () => timeline === null ? new Map<string, number>() : new Map(
+      timeline.map((entry) => [entry.transcriptId, entry.relativeSeconds]),
+    ),
+    [timeline],
+  );
+  const canSeekTranscript = detail.recordingAvailable && !synchronizationUnavailable && timeline !== null;
+  const seekTranscript = (transcriptId: string): void => {
+    if (!canSeekTranscript) return;
+    const target = timelineByTranscriptId.get(transcriptId);
+    if (target === undefined || !Number.isFinite(target) || target < 0) return;
+    playbackRef.current?.seekTo(target);
+  };
   const handlePlaybackStateChange = (state: PlaybackState): void => {
     if (state === "stopped" || state === "failed" || state === "loading") {
       setSyncActive(false);
@@ -183,6 +197,7 @@ function MeetingDetailContent({ detail }: { detail: MeetingDetail }) {
       {detail.recordingAvailable && (
         <RecordingPlayer
           key={detail.meetingId}
+          ref={playbackRef}
           meetingId={detail.meetingId}
           durationSeconds={detail.recordingDurationSeconds}
           hasGaps={detail.audioHasGaps}
@@ -196,6 +211,8 @@ function MeetingDetailContent({ detail }: { detail: MeetingDetail }) {
         detail={detail}
         activeTranscriptId={activeTranscriptId}
         synchronizationUnavailable={synchronizationUnavailable}
+        canSeekTranscript={canSeekTranscript}
+        onSeekTranscript={seekTranscript}
       />
       <MeetingReviewPanel key={detail.meetingId} meetingId={detail.meetingId} />
     </article>
@@ -216,10 +233,14 @@ function MeetingTranslationPanel({
   detail,
   activeTranscriptId,
   synchronizationUnavailable,
+  canSeekTranscript,
+  onSeekTranscript,
 }: {
   detail: MeetingDetail;
   activeTranscriptId: string | null;
   synchronizationUnavailable: boolean;
+  canSeekTranscript: boolean;
+  onSeekTranscript: (transcriptId: string) => void;
 }) {
   const [translation, setTranslation] = useState<TranslationState>({ kind: "idle" });
   const [display, setDisplay] = useState<TranscriptDisplay>("original");
@@ -353,9 +374,18 @@ function MeetingTranslationPanel({
           const missingTranslation = translationReady && translatedText === undefined;
           return (
             <article
-              className={`meeting-transcript-row ${activeDisplay === "side-by-side" ? "side-by-side" : ""} ${entry.transcriptId === activeTranscriptId ? "transcript-row--active" : ""}`}
+              className={`meeting-transcript-row ${activeDisplay === "side-by-side" ? "side-by-side" : ""} ${entry.transcriptId === activeTranscriptId ? "transcript-row--active" : ""} ${canSeekTranscript ? "meeting-transcript-row--seekable" : ""}`}
               key={entry.transcriptId}
               aria-current={entry.transcriptId === activeTranscriptId ? "true" : undefined}
+              role={canSeekTranscript ? "button" : undefined}
+              tabIndex={canSeekTranscript ? 0 : undefined}
+              onClick={canSeekTranscript ? () => onSeekTranscript(entry.transcriptId) : undefined}
+              onKeyDown={canSeekTranscript ? (event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  onSeekTranscript(entry.transcriptId);
+                }
+              } : undefined}
             >
               <header>
                 <time dateTime={entry.timestamp}>{displayTimestamp(entry.timestamp)}</time>

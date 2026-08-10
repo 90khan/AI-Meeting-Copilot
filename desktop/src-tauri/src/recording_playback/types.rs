@@ -36,6 +36,10 @@ pub struct RecordingPlaybackStatus {
 #[serde(rename_all = "camelCase")]
 pub struct RecordingPlaybackSeekResult {
     pub at_end: bool,
+    /// The opaque playback-stream generation accepted by the manager. It is
+    /// present only when a new stream was opened, so the WebView can ignore
+    /// events from the preceding stream.
+    pub generation: Option<u64>,
     pub segment_index: Option<u32>,
     pub offset_samples: Option<u32>,
     pub resolved_seconds: Option<f64>,
@@ -90,6 +94,7 @@ impl TryFrom<BackendPlaybackSeekResolution> for RecordingPlaybackSeekResult {
         match (value.at_end, value.target) {
             (true, None) => Ok(Self {
                 at_end: true,
+                generation: None,
                 segment_index: None,
                 offset_samples: None,
                 resolved_seconds: None,
@@ -99,6 +104,7 @@ impl TryFrom<BackendPlaybackSeekResolution> for RecordingPlaybackSeekResult {
             {
                 Ok(Self {
                     at_end: false,
+                    generation: None,
                     segment_index: Some(target.segment_index),
                     offset_samples: Some(target.offset_samples),
                     resolved_seconds: Some(target.resolved_seconds),
