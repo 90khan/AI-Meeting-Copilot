@@ -125,7 +125,7 @@ export default function App() {
   useEffect(() => {
     if (backendStatus?.status !== "ready") return;
     let isMounted = true;
-    void Promise.all([
+    void Promise.allSettled([
       getLiveTranscriptionStatus(),
       getAudioCaptureStatus(),
       getCaptureAuthorization(),
@@ -134,15 +134,28 @@ export default function App() {
     ])
       .then(([live, capture, auth, availableDisplays, availableMicrophones]) => {
         if (!isMounted) return;
-        setLiveStatus(live);
-        setCaptureStatus(capture);
-        setAuthorization(auth);
-        setDisplays(availableDisplays);
-        setMicrophones(availableMicrophones);
-        setDisplayId((current) => current || String(availableDisplays[0]?.id ?? ""));
-        setMicrophoneId((current) => current || (availableMicrophones[0]?.id ?? ""));
-      })
-      .catch(() => isMounted && setErrorMessage(GENERIC_CAPTURE_ERROR));
+        if (live.status === "fulfilled") setLiveStatus(live.value);
+        if (capture.status === "fulfilled") setCaptureStatus(capture.value);
+        if (auth.status === "fulfilled") setAuthorization(auth.value);
+        if (availableDisplays.status === "fulfilled") {
+          setDisplays(availableDisplays.value);
+          setDisplayId((current) => current || String(availableDisplays.value[0]?.id ?? ""));
+        } else {
+          setDisplays([]);
+        }
+        if (availableMicrophones.status === "fulfilled") {
+          setMicrophones(availableMicrophones.value);
+          setMicrophoneId((current) => current || (availableMicrophones.value[0]?.id ?? ""));
+        } else {
+          setMicrophones([]);
+        }
+        if (
+          capture.status === "rejected" ||
+          auth.status === "rejected" ||
+          availableDisplays.status === "rejected" ||
+          availableMicrophones.status === "rejected"
+        ) setErrorMessage(GENERIC_CAPTURE_ERROR);
+      });
     return () => {
       isMounted = false;
     };
