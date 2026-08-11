@@ -55,6 +55,12 @@ const LIVE_TRANSCRIPTION_SESSION_START_STAGES = new Set([
   "session_response_timeout",
   "session_protocol_failed",
   "session_connection_closed",
+  "session_not_connected",
+  "session_already_active",
+  "session_not_active",
+  "session_invalid_sequence",
+  "session_connection_failed",
+  "session_invalid_timestamp",
 ]);
 
 function connectionFailureMessage(error: unknown): string {

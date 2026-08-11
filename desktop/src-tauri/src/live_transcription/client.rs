@@ -1212,15 +1212,21 @@ pub async fn start_live_transcription_session(
 }
 
 fn session_start_failure_message(error: LiveTranscriptionClientError) -> String {
-    match error {
-        LiveTranscriptionClientError::SessionStartFailedAt(stage) => {
-            format!("The live transcription session could not be started ({stage}).")
+    let diagnostic = match error {
+        LiveTranscriptionClientError::NotConnected => "session_not_connected".to_owned(),
+        LiveTranscriptionClientError::AlreadyActive => "session_already_active".to_owned(),
+        LiveTranscriptionClientError::SessionNotActive => "session_not_active".to_owned(),
+        LiveTranscriptionClientError::InvalidSequence => "session_invalid_sequence".to_owned(),
+        LiveTranscriptionClientError::ConnectionFailed
+        | LiveTranscriptionClientError::ConnectionFailedAt(_) => {
+            "session_connection_failed".to_owned()
         }
-        LiveTranscriptionClientError::SessionStartTransportFailed(reason) => {
-            format!("The live transcription session could not be started ({reason}).")
-        }
-        _ => "The live transcription session could not be started.".to_owned(),
-    }
+        LiveTranscriptionClientError::SessionStartFailedAt(stage) => stage.to_string(),
+        LiveTranscriptionClientError::SessionStartTransportFailed(reason) => reason.to_string(),
+        LiveTranscriptionClientError::ProtocolFailed => "session_protocol_failed".to_owned(),
+        LiveTranscriptionClientError::InvalidTimestamp => "session_invalid_timestamp".to_owned(),
+    };
+    format!("The live transcription session could not be started ({diagnostic}).")
 }
 
 #[tauri::command]
@@ -1984,10 +1990,64 @@ mod tests {
             assert!(!message.contains("token"));
             assert!(!message.contains("provider"));
         }
-        assert_eq!(
-            session_start_failure_message(LiveTranscriptionClientError::ProtocolFailed),
-            "The live transcription session could not be started."
-        );
+    }
+
+    #[test]
+    fn every_remaining_start_session_error_maps_to_a_safe_diagnostic() {
+        let expected = [
+            (
+                LiveTranscriptionClientError::NotConnected,
+                "session_not_connected",
+            ),
+            (
+                LiveTranscriptionClientError::AlreadyActive,
+                "session_already_active",
+            ),
+            (
+                LiveTranscriptionClientError::SessionNotActive,
+                "session_not_active",
+            ),
+            (
+                LiveTranscriptionClientError::InvalidSequence,
+                "session_invalid_sequence",
+            ),
+            (
+                LiveTranscriptionClientError::ConnectionFailed,
+                "session_connection_failed",
+            ),
+            (
+                LiveTranscriptionClientError::ConnectionFailedAt(
+                    LiveTranscriptionConnectStage::WebsocketOpen,
+                ),
+                "session_connection_failed",
+            ),
+            (
+                LiveTranscriptionClientError::ProtocolFailed,
+                "session_protocol_failed",
+            ),
+            (
+                LiveTranscriptionClientError::InvalidTimestamp,
+                "session_invalid_timestamp",
+            ),
+        ];
+
+        for (error, identifier) in expected {
+            let message = session_start_failure_message(error);
+            assert_eq!(
+                message,
+                format!("The live transcription session could not be started ({identifier}).")
+            );
+            for forbidden in [
+                "token",
+                "ws://",
+                "127.0.0.1",
+                "payload",
+                "provider",
+                "websocket_open",
+            ] {
+                assert!(!message.contains(forbidden));
+            }
+        }
     }
 
     #[tokio::test]
