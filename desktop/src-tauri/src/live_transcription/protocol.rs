@@ -201,6 +201,26 @@ pub(crate) struct SessionStarted {
 pub(crate) struct ProtocolFailure {
     pub(crate) fatal: bool,
     pub(crate) expected_sequence: Option<u64>,
+    pub(crate) session_start_stage: Option<SessionStartFailureStage>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionStartFailureStage {
+    MeetingValidation,
+    Factory,
+    AssistInitialization,
+    StartedSend,
+}
+
+impl SessionStartFailureStage {
+    pub(crate) const fn identifier(self) -> &'static str {
+        match self {
+            Self::MeetingValidation => "session_meeting_validation",
+            Self::Factory => "session_factory",
+            Self::AssistInitialization => "session_assist_initialization",
+            Self::StartedSend => "session_started_send",
+        }
+    }
 }
 
 pub(crate) struct SessionStopped {
@@ -505,6 +525,7 @@ fn parse_error(object: &serde_json::Map<String, Value>) -> Result<ServerMessage,
             "session_id",
             "request_id",
             "expected_sequence",
+            "session_start_stage",
         ],
     )?;
     validate_version(object)?;
@@ -522,7 +543,32 @@ fn parse_error(object: &serde_json::Map<String, Value>) -> Result<ServerMessage,
             .and_then(Value::as_bool)
             .unwrap_or(false),
         expected_sequence: optional_u64(object, "expected_sequence")?,
+        session_start_stage: parse_optional_session_start_failure_stage(
+            object,
+            "session_start_stage",
+        )?,
     }))
+}
+
+fn parse_optional_session_start_failure_stage(
+    object: &serde_json::Map<String, Value>,
+    field: &str,
+) -> Result<Option<SessionStartFailureStage>, ProtocolError> {
+    let Some(value) = object.get(field) else {
+        return Err(ProtocolError::InvalidMessage);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    match value.as_str() {
+        Some("session_meeting_validation") => Ok(Some(SessionStartFailureStage::MeetingValidation)),
+        Some("session_factory") => Ok(Some(SessionStartFailureStage::Factory)),
+        Some("session_assist_initialization") => {
+            Ok(Some(SessionStartFailureStage::AssistInitialization))
+        }
+        Some("session_started_send") => Ok(Some(SessionStartFailureStage::StartedSend)),
+        _ => Err(ProtocolError::InvalidMessage),
+    }
 }
 
 fn parse_session_stopped(
@@ -756,6 +802,28 @@ mod tests {
             Err(ProtocolError::InvalidMessage)
         ));
         assert_eq!(AudioSource::SystemAudio.as_str(), "system_audio");
+    }
+
+    #[test]
+    fn parses_only_allowlisted_session_start_failure_stages_without_error_details() {
+        let payload = r#"{"type":"error","version":1,"code":"session_start_failed","message":"private token and provider detail","fatal":true,"session_id":null,"request_id":"00000000-0000-0000-0000-000000000001","expected_sequence":null,"session_start_stage":"session_factory"}"#;
+
+        let ServerMessage::Error(error) = parse_server_message(payload).expect("error parses")
+        else {
+            panic!("expected protocol error");
+        };
+
+        assert_eq!(
+            error
+                .session_start_stage
+                .expect("stage is retained")
+                .identifier(),
+            "session_factory"
+        );
+        assert!(matches!(
+            parse_server_message(&payload.replace("session_factory", "private token")),
+            Err(ProtocolError::InvalidMessage)
+        ));
     }
 
     #[test]

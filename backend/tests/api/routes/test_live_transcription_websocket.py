@@ -16,7 +16,10 @@ from app.api.live_transcription.binary_frames import (
 from app.api.live_transcription.protocol import (
     AssistModeSessionConfiguration,
     EndSessionMessage,
+    HelloAckMessage,
     HelloMessage,
+    SessionStartedMessage,
+    SessionStoppedMessage,
     StartSessionMessage,
     serialize_protocol_message,
 )
@@ -40,7 +43,7 @@ from app.application.exceptions import (
 )
 from app.domain.exceptions import InvalidStateTransitionError
 from app.domain.value_objects import MeetingId
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
@@ -167,6 +170,8 @@ class FakeContainer:
         debug: bool = False,
         assist_unavailable: bool = False,
         assist_enqueue_failure: bool = False,
+        session_failure: Exception | None = None,
+        assist_failure: Exception | None = None,
     ) -> None:
         """Initialize fake lifecycle dependencies and configuration tracking."""
 
@@ -176,6 +181,8 @@ class FakeContainer:
         self.debug = debug
         self.assist_unavailable = assist_unavailable
         self.assist_enqueue_failure = assist_enqueue_failure
+        self.session_failure = session_failure
+        self.assist_failure = assist_failure
         self.sessions: list[FakeSession] = []
         self.assist_orchestrators: list[FakeAssistOrchestrator] = []
 
@@ -203,6 +210,8 @@ class FakeContainer:
     ) -> FakeSession:
         """Create a configured session fake for this transport connection."""
 
+        if self.session_failure is not None:
+            raise self.session_failure
         session = FakeSession(
             meeting_id=meeting_id,
             language_hint=language_hint,
@@ -221,6 +230,8 @@ class FakeContainer:
         """Create a connection-local fake or simulate unavailable providers."""
 
         del configuration
+        if self.assist_failure is not None:
+            raise self.assist_failure
         if self.assist_unavailable:
             raise ProviderUnavailableError("private provider detail")
         orchestrator = FakeAssistOrchestrator(
@@ -399,6 +410,97 @@ def test_session_start_validation_failure_is_fatal() -> None:
     assert error.value.code == 4400
     assert container.sessions == []
     assert "internal state detail" not in response["message"]
+
+
+@pytest.mark.parametrize(
+    ("container", "assist_mode", "expected_stage"),
+    [
+        (
+            FakeContainer(start_failure=RuntimeError("database secret")),
+            None,
+            "session_meeting_validation",
+        ),
+        (
+            FakeContainer(session_failure=RuntimeError("private factory path")),
+            None,
+            "session_factory",
+        ),
+        (
+            FakeContainer(assist_failure=RuntimeError("provider token")),
+            AssistModeSessionConfiguration(
+                enabled=True,
+                translation_enabled=True,
+                simplification_enabled=False,
+                simplification_level=None,
+                reply_coaching_enabled=False,
+            ),
+            "session_assist_initialization",
+        ),
+    ],
+)
+def test_unexpected_session_start_failures_expose_only_the_allowlisted_stage(
+    container: FakeContainer,
+    assist_mode: AssistModeSessionConfiguration | None,
+    expected_stage: str,
+) -> None:
+    """Unexpected startup failures have a closed diagnostic without details."""
+
+    with _client(_app(container)) as client:
+        with pytest.raises(WebSocketDisconnect) as error:
+            with client.websocket_connect(_PATH) as websocket:
+                websocket.send_text(_hello())
+                websocket.receive_text()
+                websocket.send_text(_start(assist_mode=assist_mode))
+                response = json.loads(websocket.receive_text())
+                websocket.receive_text()
+
+    assert error.value.code == 1011
+    assert response == {
+        "code": "session_start_failed",
+        "expected_sequence": None,
+        "fatal": True,
+        "message": "The live transcription session could not be started.",
+        "request_id": str(_REQUEST_ID),
+        "session_id": None,
+        "session_start_stage": expected_stage,
+        "type": "error",
+        "version": 1,
+    }
+    assert "secret" not in json.dumps(response)
+    assert "private" not in json.dumps(response)
+    assert "token" not in json.dumps(response)
+
+
+def test_session_started_send_failure_exposes_only_its_allowlisted_stage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed session-start acknowledgement maps to a safe stage identifier."""
+
+    import app.api.routes.live_transcription as route_module
+
+    original_send_control = route_module._send_control
+
+    async def fail_only_session_started(
+        websocket: WebSocket,
+        message: HelloAckMessage | SessionStartedMessage | SessionStoppedMessage,
+    ) -> None:
+        if isinstance(message, SessionStartedMessage):
+            raise RuntimeError("private socket detail")
+        await original_send_control(websocket, message)
+
+    monkeypatch.setattr(route_module, "_send_control", fail_only_session_started)
+    with _client(_app(FakeContainer())) as client:
+        with pytest.raises(WebSocketDisconnect) as error:
+            with client.websocket_connect(_PATH) as websocket:
+                websocket.send_text(_hello())
+                websocket.receive_text()
+                websocket.send_text(_start())
+                response = json.loads(websocket.receive_text())
+                websocket.receive_text()
+
+    assert error.value.code == 1011
+    assert response["session_start_stage"] == "session_started_send"
+    assert "private socket detail" not in response["message"]
 
 
 def test_sequence_violations_do_not_process_chunks_and_close_after_three() -> None:

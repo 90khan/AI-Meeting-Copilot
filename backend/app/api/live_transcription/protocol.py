@@ -3,6 +3,7 @@
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import StrEnum
 from uuid import UUID
 
 from app.application.dto.ai import GermanLevel, LanguageCode
@@ -15,6 +16,15 @@ AUDIO_FRAME_MAGIC = b"AMCP"
 AUDIO_MESSAGE_KIND = 1
 DEFAULT_MAX_BINARY_PAYLOAD_BYTES = 524_288
 DEFAULT_MAX_IN_FLIGHT_CHUNKS = 1
+
+
+class SessionStartFailureStage(StrEnum):
+    """Allowlisted diagnostics for unexpected session-start failures only."""
+
+    MEETING_VALIDATION = "session_meeting_validation"
+    FACTORY = "session_factory"
+    ASSIST_INITIALIZATION = "session_assist_initialization"
+    STARTED_SEND = "session_started_send"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -161,6 +171,7 @@ class ProtocolErrorMessage:
     session_id: UUID | None = None
     request_id: UUID | None = None
     expected_sequence: int | None = None
+    session_start_stage: SessionStartFailureStage | None = None
 
     def __post_init__(self) -> None:
         _validate_protocol_version(self.version)
@@ -170,6 +181,10 @@ class ProtocolErrorMessage:
             raise ApplicationValidationError("Error fatal flag must be a boolean.")
         if self.expected_sequence is not None:
             _validate_non_negative_integer(self.expected_sequence, "Expected sequence")
+        if self.session_start_stage is not None and not isinstance(
+            self.session_start_stage, SessionStartFailureStage
+        ):
+            raise ApplicationValidationError("Session start failure stage is invalid.")
 
 
 type ProtocolMessage = (
@@ -299,6 +314,7 @@ def _message_to_payload(
             session_id=session_id,
             request_id=request_id,
             expected_sequence=expected_sequence,
+            session_start_stage=session_start_stage,
         ):
             payload.update(
                 code=code,
@@ -307,6 +323,11 @@ def _message_to_payload(
                 session_id=(str(session_id) if session_id is not None else None),
                 request_id=(str(request_id) if request_id is not None else None),
                 expected_sequence=expected_sequence,
+                session_start_stage=(
+                    session_start_stage.value
+                    if session_start_stage is not None
+                    else None
+                ),
             )
     return payload
 
@@ -420,6 +441,7 @@ def _parse_error(data: dict[str, object]) -> ProtocolErrorMessage:
             "session_id",
             "request_id",
             "expected_sequence",
+            "session_start_stage",
         },
     )
     fatal = data["fatal"]
@@ -433,6 +455,9 @@ def _parse_error(data: dict[str, object]) -> ProtocolErrorMessage:
         session_id=_parse_optional_uuid(data, "session_id"),
         request_id=_parse_optional_uuid(data, "request_id"),
         expected_sequence=_optional_integer(data, "expected_sequence"),
+        session_start_stage=_optional_session_start_failure_stage(
+            data, "session_start_stage"
+        ),
     )
 
 
@@ -489,6 +514,21 @@ def _parse_optional_uuid(data: dict[str, object], field_name: str) -> UUID | Non
     if data[field_name] is None:
         return None
     return _parse_uuid(data, field_name)
+
+
+def _optional_session_start_failure_stage(
+    data: dict[str, object], field_name: str
+) -> SessionStartFailureStage | None:
+    """Parse the optional, closed-set diagnostic without accepting arbitrary text."""
+
+    if data[field_name] is None:
+        return None
+    try:
+        return SessionStartFailureStage(_require_string(data, field_name))
+    except ValueError as error:
+        raise ApplicationValidationError(
+            "Session start failure stage is invalid."
+        ) from error
 
 
 def _optional_language_code(

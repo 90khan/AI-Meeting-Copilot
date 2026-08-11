@@ -13,6 +13,7 @@ from app.api.live_transcription.protocol import (
     HelloMessage,
     ProtocolErrorMessage,
     SessionStartedMessage,
+    SessionStartFailureStage,
     SessionStoppedMessage,
     StartSessionMessage,
     parse_protocol_message,
@@ -109,6 +110,23 @@ def test_message_dtos_are_immutable() -> None:
 
     with pytest.raises(FrozenInstanceError):
         message.token = "replacement"  # type: ignore[misc]
+
+
+def test_protocol_error_round_trips_only_an_allowlisted_session_start_stage() -> None:
+    """Startup diagnostics remain a closed safe set rather than raw exception text."""
+
+    message = ProtocolErrorMessage(
+        version=1,
+        code="session_start_failed",
+        message="The live transcription session could not be started.",
+        fatal=True,
+        session_start_stage=SessionStartFailureStage.FACTORY,
+    )
+
+    serialized = serialize_protocol_message(message)
+
+    assert json.loads(serialized)["session_start_stage"] == "session_factory"
+    assert parse_protocol_message(serialized) == message
 
 
 @pytest.mark.parametrize(

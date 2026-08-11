@@ -46,6 +46,12 @@ const LIVE_TRANSCRIPTION_CONNECT_STAGES = new Set([
   "hello_ack_receive",
   "hello_ack_parse",
 ]);
+const LIVE_TRANSCRIPTION_SESSION_START_STAGES = new Set([
+  "session_meeting_validation",
+  "session_factory",
+  "session_assist_initialization",
+  "session_started_send",
+]);
 
 function connectionFailureMessage(error: unknown): string {
   const message = typeof error === "string"
@@ -58,6 +64,19 @@ function connectionFailureMessage(error: unknown): string {
   return stage !== undefined && LIVE_TRANSCRIPTION_CONNECT_STAGES.has(stage)
     ? `The live transcription connection could not be established (${stage}).`
     : "The live transcription connection could not be established.";
+}
+
+function sessionStartFailureMessage(error: unknown): string {
+  const message = typeof error === "string"
+    ? error
+    : error instanceof Error
+      ? error.message
+      : "";
+  const matched = /^The live transcription session could not be started \(([^)]+)\)\.$/.exec(message);
+  const stage = matched?.[1];
+  return stage !== undefined && LIVE_TRANSCRIPTION_SESSION_START_STAGES.has(stage)
+    ? `The live transcription session could not be started (${stage}).`
+    : "The live transcription session could not be started.";
 }
 
 function withoutStaleEndpoint(status: BackendStatus): BackendStatus {
@@ -297,8 +316,8 @@ export default function App() {
         setActiveMeetingId(meeting.meetingId);
         setLiveStatus(session);
         dispatchAssist({ type: "connection", status: "active" });
-      } catch {
-        setErrorMessage("The live transcription session could not be started.");
+      } catch (error) {
+        setErrorMessage(sessionStartFailureMessage(error));
       }
     } finally {
       setPendingOperation(null);

@@ -30,7 +30,7 @@ use super::{
     binary_frames::{build_audio_chunk_frame, AudioChunkFrameMetadata, BinaryFrameError},
     protocol::{
         parse_server_message, serialize_end_session, serialize_hello, serialize_start_session,
-        AssistModeConfiguration, AudioSource, ServerMessage,
+        AssistModeConfiguration, AudioSource, ServerMessage, SessionStartFailureStage,
     },
 };
 
@@ -68,6 +68,42 @@ impl LiveTranscriptionConnectStage {
 impl fmt::Display for LiveTranscriptionConnectStage {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.identifier())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LiveTranscriptionSessionStartStage {
+    MeetingValidation,
+    Factory,
+    AssistInitialization,
+    StartedSend,
+}
+
+impl LiveTranscriptionSessionStartStage {
+    const fn identifier(self) -> &'static str {
+        match self {
+            Self::MeetingValidation => "session_meeting_validation",
+            Self::Factory => "session_factory",
+            Self::AssistInitialization => "session_assist_initialization",
+            Self::StartedSend => "session_started_send",
+        }
+    }
+}
+
+impl fmt::Display for LiveTranscriptionSessionStartStage {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.identifier())
+    }
+}
+
+impl From<SessionStartFailureStage> for LiveTranscriptionSessionStartStage {
+    fn from(stage: SessionStartFailureStage) -> Self {
+        match stage {
+            SessionStartFailureStage::MeetingValidation => Self::MeetingValidation,
+            SessionStartFailureStage::Factory => Self::Factory,
+            SessionStartFailureStage::AssistInitialization => Self::AssistInitialization,
+            SessionStartFailureStage::StartedSend => Self::StartedSend,
+        }
     }
 }
 
@@ -109,6 +145,8 @@ pub enum LiveTranscriptionClientError {
     ConnectionFailed,
     #[error("The live transcription connection could not be established ({0}).")]
     ConnectionFailedAt(LiveTranscriptionConnectStage),
+    #[error("The live transcription session could not be started ({0}).")]
+    SessionStartFailedAt(LiveTranscriptionSessionStartStage),
     #[error("The live transcription protocol failed.")]
     ProtocolFailed,
     #[error("The audio chunk timestamp is invalid.")]
@@ -1142,8 +1180,17 @@ pub async fn start_live_transcription_session(
             input.assist_mode,
         )
         .await
-        .map_err(|_| "The live transcription session could not be started.".to_owned())?;
+        .map_err(session_start_failure_message)?;
     Ok(client.status().await)
+}
+
+fn session_start_failure_message(error: LiveTranscriptionClientError) -> String {
+    match error {
+        LiveTranscriptionClientError::SessionStartFailedAt(stage) => {
+            format!("The live transcription session could not be started ({stage}).")
+        }
+        _ => "The live transcription session could not be started.".to_owned(),
+    }
 }
 
 #[tauri::command]
@@ -1409,14 +1456,15 @@ async fn dispatch_message(
         }
         Ok(ServerMessage::Error(error)) => {
             let mut state = state.lock().await;
-            fail_pending_operations_with(
-                &mut state,
-                if error.fatal {
+            let operation_error = error
+                .session_start_stage
+                .map(|stage| LiveTranscriptionClientError::SessionStartFailedAt(stage.into()))
+                .unwrap_or(if error.fatal {
                     LiveTranscriptionClientError::ConnectionFailed
                 } else {
                     LiveTranscriptionClientError::ProtocolFailed
-                },
-            );
+                });
+            fail_pending_operations_with(&mut state, operation_error);
             if error.fatal {
                 mark_failed_state(&mut state);
                 true
@@ -1612,10 +1660,11 @@ fn public_status(state: &ClientState) -> LiveTranscriptionStatus {
 mod tests {
     use super::{
         clear_disconnected, dispatch_message, fail_pending_operations, mark_connect_failed_state,
-        mark_failed_state, validate_chunk_admission, ActiveSession, ClientState,
-        LiveTranscriptionClientError, LiveTranscriptionConnectStage,
-        LiveTranscriptionLifecycleStatus, LiveTranscriptionStatus, MeetingReviewArtifact,
-        MeetingTranslationArtifact, PendingChunk, PendingEnd, PendingStart,
+        mark_failed_state, session_start_failure_message, validate_chunk_admission, ActiveSession,
+        ClientState, LiveTranscriptionClientError, LiveTranscriptionConnectStage,
+        LiveTranscriptionLifecycleStatus, LiveTranscriptionSessionStartStage,
+        LiveTranscriptionStatus, MeetingReviewArtifact, MeetingTranslationArtifact, PendingChunk,
+        PendingEnd, PendingStart,
     };
     use crate::{
         assist_mode::events::{
@@ -1819,6 +1868,44 @@ mod tests {
 
         assert!(!serialized.contains("token"));
         assert_eq!(serialized, r#"{"status":"connected","message":null}"#);
+    }
+
+    #[test]
+    fn session_start_stage_messages_are_allowlisted_and_private() {
+        let stages = [
+            (
+                LiveTranscriptionSessionStartStage::MeetingValidation,
+                "session_meeting_validation",
+            ),
+            (
+                LiveTranscriptionSessionStartStage::Factory,
+                "session_factory",
+            ),
+            (
+                LiveTranscriptionSessionStartStage::AssistInitialization,
+                "session_assist_initialization",
+            ),
+            (
+                LiveTranscriptionSessionStartStage::StartedSend,
+                "session_started_send",
+            ),
+        ];
+
+        for (stage, identifier) in stages {
+            let message = session_start_failure_message(
+                LiveTranscriptionClientError::SessionStartFailedAt(stage),
+            );
+            assert_eq!(
+                message,
+                format!("The live transcription session could not be started ({identifier}).")
+            );
+            assert!(!message.contains("token"));
+            assert!(!message.contains("provider"));
+        }
+        assert_eq!(
+            session_start_failure_message(LiveTranscriptionClientError::ProtocolFailed),
+            "The live transcription session could not be started."
+        );
     }
 
     #[test]

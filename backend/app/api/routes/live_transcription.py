@@ -19,6 +19,7 @@ from app.api.live_transcription.protocol import (
     HelloMessage,
     ProtocolErrorMessage,
     SessionStartedMessage,
+    SessionStartFailureStage,
     SessionStoppedMessage,
     StartSessionMessage,
     parse_protocol_message,
@@ -147,22 +148,34 @@ async def live_transcription(websocket: WebSocket) -> None:
                         is_closed = True
                         return
 
+                    except Exception:
+                        await _send_session_start_failure(
+                            websocket,
+                            request_id=control.request_id,
+                            stage=SessionStartFailureStage.MEETING_VALIDATION,
+                        )
+                        is_closed = True
+                        return
+
+                    try:
+                        active_session = container.get_live_transcription_session(
+                            meeting_id=validated.meeting_id,
+                            language_hint=validated.language_hint,
+                            source=validated.source,
+                        )
+                    except Exception:
+                        await _send_session_start_failure(
+                            websocket,
+                            request_id=control.request_id,
+                            stage=SessionStartFailureStage.FACTORY,
+                        )
+                        is_closed = True
+                        return
+
                     session_id = uuid4()
-                    active_session = container.get_live_transcription_session(
-                        meeting_id=validated.meeting_id,
-                        language_hint=validated.language_hint,
-                        source=validated.source,
-                    )
                     expected_sequence = 0
                     sequence_violations = 0
-                    await _send_control(
-                        websocket,
-                        SessionStartedMessage(
-                            version=PROTOCOL_VERSION,
-                            request_id=control.request_id,
-                            session_id=session_id,
-                        ),
-                    )
+                    assist_unavailable = False
                     if control.assist_mode is not None and control.assist_mode.enabled:
                         try:
                             assist_orchestrator = (
@@ -191,16 +204,43 @@ async def live_transcription(websocket: WebSocket) -> None:
                                 )
                             )
                             await assist_orchestrator.start()
-                        except (ProviderUnavailableError, RuntimeError):
+                        except ProviderUnavailableError:
                             assist_orchestrator = None
-                            await _send_protocol_error(
+                            assist_unavailable = True
+                        except Exception:
+                            await _send_session_start_failure(
                                 websocket,
-                                code="assist_unavailable",
-                                message="Assist Mode is unavailable.",
-                                fatal=False,
-                                session_id=session_id,
                                 request_id=control.request_id,
+                                stage=SessionStartFailureStage.ASSIST_INITIALIZATION,
                             )
+                            is_closed = True
+                            return
+                    try:
+                        await _send_control(
+                            websocket,
+                            SessionStartedMessage(
+                                version=PROTOCOL_VERSION,
+                                request_id=control.request_id,
+                                session_id=session_id,
+                            ),
+                        )
+                    except Exception:
+                        await _send_session_start_failure(
+                            websocket,
+                            request_id=control.request_id,
+                            stage=SessionStartFailureStage.STARTED_SEND,
+                        )
+                        is_closed = True
+                        return
+                    if assist_unavailable:
+                        await _send_protocol_error(
+                            websocket,
+                            code="assist_unavailable",
+                            message="Assist Mode is unavailable.",
+                            fatal=False,
+                            session_id=session_id,
+                            request_id=control.request_id,
+                        )
                     continue
 
                 if isinstance(control, EndSessionMessage):
@@ -481,6 +521,7 @@ async def _send_protocol_error(
     session_id: UUID | None = None,
     request_id: UUID | None = None,
     expected_sequence: int | None = None,
+    session_start_stage: SessionStartFailureStage | None = None,
 ) -> None:
     """Send a control error that deliberately omits sensitive payload details."""
 
@@ -495,9 +536,31 @@ async def _send_protocol_error(
                 session_id=session_id,
                 request_id=request_id,
                 expected_sequence=expected_sequence,
+                session_start_stage=session_start_stage,
             )
         ),
     )
+
+
+async def _send_session_start_failure(
+    websocket: WebSocket,
+    *,
+    request_id: UUID,
+    stage: SessionStartFailureStage,
+) -> None:
+    """Report one unexpected startup failure using a closed, privacy-safe stage."""
+
+    try:
+        await _send_protocol_error(
+            websocket,
+            code="session_start_failed",
+            message="The live transcription session could not be started.",
+            fatal=True,
+            request_id=request_id,
+            session_start_stage=stage,
+        )
+    finally:
+        await websocket.close(code=1011)
 
 
 async def _send_chunk_result(
