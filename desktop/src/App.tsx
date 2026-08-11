@@ -241,6 +241,28 @@ export default function App() {
     setErrorMessage(null);
     try {
       setAuthorization(await requestCaptureAuthorization());
+      const [availableDisplays, availableMicrophones] = await Promise.allSettled([
+        listCaptureDisplays(),
+        listCaptureMicrophones(),
+      ]);
+      if (availableDisplays.status === "fulfilled") {
+        setDisplays(availableDisplays.value);
+        setDisplayId((current) => current || String(availableDisplays.value[0]?.id ?? ""));
+      } else {
+        setDisplays([]);
+      }
+      if (availableMicrophones.status === "fulfilled") {
+        setMicrophones(availableMicrophones.value);
+        setMicrophoneId((current) => current || (availableMicrophones.value[0]?.id ?? ""));
+      } else {
+        setMicrophones([]);
+      }
+      if (
+        availableDisplays.status === "rejected" ||
+        availableMicrophones.status === "rejected"
+      ) {
+        setErrorMessage(GENERIC_CAPTURE_ERROR);
+      }
     } catch {
       setErrorMessage(GENERIC_CAPTURE_ERROR);
     } finally {
