@@ -79,6 +79,31 @@ pub(crate) enum LiveTranscriptionSessionStartStage {
     StartedSend,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LiveTranscriptionSessionStartTransportFailure {
+    ChannelClosed,
+    Timeout,
+    ProtocolFailed,
+    ConnectionClosed,
+}
+
+impl LiveTranscriptionSessionStartTransportFailure {
+    const fn identifier(self) -> &'static str {
+        match self {
+            Self::ChannelClosed => "session_response_channel_closed",
+            Self::Timeout => "session_response_timeout",
+            Self::ProtocolFailed => "session_protocol_failed",
+            Self::ConnectionClosed => "session_connection_closed",
+        }
+    }
+}
+
+impl fmt::Display for LiveTranscriptionSessionStartTransportFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.identifier())
+    }
+}
+
 impl LiveTranscriptionSessionStartStage {
     const fn identifier(self) -> &'static str {
         match self {
@@ -147,6 +172,8 @@ pub enum LiveTranscriptionClientError {
     ConnectionFailedAt(LiveTranscriptionConnectStage),
     #[error("The live transcription session could not be started ({0}).")]
     SessionStartFailedAt(LiveTranscriptionSessionStartStage),
+    #[error("The live transcription session could not be started ({0}).")]
+    SessionStartTransportFailed(LiveTranscriptionSessionStartTransportFailure),
     #[error("The live transcription protocol failed.")]
     ProtocolFailed,
     #[error("The audio chunk timestamp is invalid.")]
@@ -672,7 +699,7 @@ impl LiveTranscriptionClient {
             self.clear_pending_start(request_id).await;
             return Err(self.mark_failed().await);
         }
-        match wait_for_response(receiver).await {
+        match wait_for_start_response(receiver).await {
             Ok(started) => {
                 let mut state = self.state.lock().await;
                 state.status = LiveTranscriptionLifecycleStatus::SessionActive;
@@ -1189,6 +1216,9 @@ fn session_start_failure_message(error: LiveTranscriptionClientError) -> String 
         LiveTranscriptionClientError::SessionStartFailedAt(stage) => {
             format!("The live transcription session could not be started ({stage}).")
         }
+        LiveTranscriptionClientError::SessionStartTransportFailed(reason) => {
+            format!("The live transcription session could not be started ({reason}).")
+        }
         _ => "The live transcription session could not be started.".to_owned(),
     }
 }
@@ -1369,6 +1399,10 @@ async fn run_dispatcher(
         }
     }
     let mut state = state.lock().await;
+    fail_pending_start_for_transport(
+        &mut state,
+        LiveTranscriptionSessionStartTransportFailure::ChannelClosed,
+    );
     fail_pending_operations(&mut state);
     mark_failed_state(&mut state);
 }
@@ -1380,8 +1414,20 @@ async fn dispatch_message(
     message: InboundMessage,
 ) -> bool {
     match message {
-        Err(_) => {
+        Err(error) => {
             let mut state = state.lock().await;
+            if state.pending_start.is_some() {
+                let reason = match error {
+                    LiveTranscriptionClientError::ProtocolFailed => {
+                        LiveTranscriptionSessionStartTransportFailure::ProtocolFailed
+                    }
+                    LiveTranscriptionClientError::ConnectionFailed => {
+                        LiveTranscriptionSessionStartTransportFailure::ConnectionClosed
+                    }
+                    _ => LiveTranscriptionSessionStartTransportFailure::ChannelClosed,
+                };
+                fail_pending_start_for_transport(&mut state, reason);
+            }
             fail_pending_operations(&mut state);
             mark_failed_state(&mut state);
             true
@@ -1504,6 +1550,27 @@ async fn wait_for_response<T>(
         Ok(Ok(result)) => result,
         Ok(Err(_)) => Err(LiveTranscriptionClientError::ConnectionFailed),
         Err(_) => Err(LiveTranscriptionClientError::ConnectionFailed),
+    }
+}
+
+async fn wait_for_start_response<T>(
+    receiver: oneshot::Receiver<Result<T, LiveTranscriptionClientError>>,
+) -> Result<T, LiveTranscriptionClientError> {
+    wait_for_start_response_with_timeout(receiver, HANDSHAKE_TIMEOUT).await
+}
+
+async fn wait_for_start_response_with_timeout<T>(
+    receiver: oneshot::Receiver<Result<T, LiveTranscriptionClientError>>,
+    wait_timeout: Duration,
+) -> Result<T, LiveTranscriptionClientError> {
+    match timeout(wait_timeout, receiver).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) => Err(LiveTranscriptionClientError::SessionStartTransportFailed(
+            LiveTranscriptionSessionStartTransportFailure::ChannelClosed,
+        )),
+        Err(_) => Err(LiveTranscriptionClientError::SessionStartTransportFailed(
+            LiveTranscriptionSessionStartTransportFailure::Timeout,
+        )),
     }
 }
 
@@ -1649,6 +1716,17 @@ fn fail_pending_operations_with(state: &mut ClientState, error: LiveTranscriptio
     }
 }
 
+fn fail_pending_start_for_transport(
+    state: &mut ClientState,
+    reason: LiveTranscriptionSessionStartTransportFailure,
+) {
+    if let Some(pending) = state.pending_start.take() {
+        let _ = pending.responder.send(Err(
+            LiveTranscriptionClientError::SessionStartTransportFailed(reason),
+        ));
+    }
+}
+
 fn public_status(state: &ClientState) -> LiveTranscriptionStatus {
     LiveTranscriptionStatus {
         status: state.status,
@@ -1660,11 +1738,12 @@ fn public_status(state: &ClientState) -> LiveTranscriptionStatus {
 mod tests {
     use super::{
         clear_disconnected, dispatch_message, fail_pending_operations, mark_connect_failed_state,
-        mark_failed_state, session_start_failure_message, validate_chunk_admission, ActiveSession,
-        ClientState, LiveTranscriptionClientError, LiveTranscriptionConnectStage,
+        mark_failed_state, session_start_failure_message, validate_chunk_admission,
+        wait_for_start_response, wait_for_start_response_with_timeout, ActiveSession, ClientState,
+        LiveTranscriptionClientError, LiveTranscriptionConnectStage,
         LiveTranscriptionLifecycleStatus, LiveTranscriptionSessionStartStage,
-        LiveTranscriptionStatus, MeetingReviewArtifact, MeetingTranslationArtifact, PendingChunk,
-        PendingEnd, PendingStart,
+        LiveTranscriptionSessionStartTransportFailure, LiveTranscriptionStatus,
+        MeetingReviewArtifact, MeetingTranslationArtifact, PendingChunk, PendingEnd, PendingStart,
     };
     use crate::{
         assist_mode::events::{
@@ -1680,7 +1759,10 @@ mod tests {
             },
         },
     };
-    use std::sync::{Arc, Mutex as StdMutex};
+    use std::{
+        sync::{Arc, Mutex as StdMutex},
+        time::Duration,
+    };
     use tokio::sync::{oneshot, Mutex};
     use uuid::Uuid;
 
@@ -1906,6 +1988,109 @@ mod tests {
             session_start_failure_message(LiveTranscriptionClientError::ProtocolFailed),
             "The live transcription session could not be started."
         );
+    }
+
+    #[tokio::test]
+    async fn start_response_wait_preserves_backend_stage_failures() {
+        let (sender, receiver) = oneshot::channel::<Result<(), LiveTranscriptionClientError>>();
+        sender
+            .send(Err(LiveTranscriptionClientError::SessionStartFailedAt(
+                LiveTranscriptionSessionStartStage::Factory,
+            )))
+            .expect("receiver remains connected");
+
+        assert_eq!(
+            wait_for_start_response(receiver).await,
+            Err(LiveTranscriptionClientError::SessionStartFailedAt(
+                LiveTranscriptionSessionStartStage::Factory,
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn start_response_wait_distinguishes_closed_channels_and_timeouts() {
+        let (closed_sender, closed_receiver) =
+            oneshot::channel::<Result<(), LiveTranscriptionClientError>>();
+        drop(closed_sender);
+        assert_eq!(
+            wait_for_start_response(closed_receiver).await,
+            Err(LiveTranscriptionClientError::SessionStartTransportFailed(
+                LiveTranscriptionSessionStartTransportFailure::ChannelClosed,
+            ))
+        );
+
+        let (_timeout_sender, timeout_receiver) =
+            oneshot::channel::<Result<(), LiveTranscriptionClientError>>();
+        assert_eq!(
+            wait_for_start_response_with_timeout(timeout_receiver, Duration::from_millis(1)).await,
+            Err(LiveTranscriptionClientError::SessionStartTransportFailed(
+                LiveTranscriptionSessionStartTransportFailure::Timeout,
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn reader_failures_distinguish_start_protocol_and_connection_closure() {
+        for (inbound_error, expected) in [
+            (
+                LiveTranscriptionClientError::ProtocolFailed,
+                LiveTranscriptionSessionStartTransportFailure::ProtocolFailed,
+            ),
+            (
+                LiveTranscriptionClientError::ConnectionFailed,
+                LiveTranscriptionSessionStartTransportFailure::ConnectionClosed,
+            ),
+        ] {
+            let state = Arc::new(Mutex::new(ClientState::default()));
+            let event_sink = Arc::new(Mutex::new(None));
+            let (sender, receiver) = oneshot::channel();
+            state.lock().await.pending_start = Some(PendingStart {
+                request_id: Uuid::new_v4(),
+                responder: sender,
+            });
+
+            assert!(dispatch_message(&state, &event_sink, Err(inbound_error)).await);
+            assert!(matches!(
+                receiver.await.expect("responder remains connected"),
+                Err(LiveTranscriptionClientError::SessionStartTransportFailed(reason))
+                    if reason == expected
+            ));
+        }
+    }
+
+    #[test]
+    fn start_transport_diagnostics_are_allowlisted_and_private() {
+        let expected = [
+            (
+                LiveTranscriptionSessionStartTransportFailure::ChannelClosed,
+                "session_response_channel_closed",
+            ),
+            (
+                LiveTranscriptionSessionStartTransportFailure::Timeout,
+                "session_response_timeout",
+            ),
+            (
+                LiveTranscriptionSessionStartTransportFailure::ProtocolFailed,
+                "session_protocol_failed",
+            ),
+            (
+                LiveTranscriptionSessionStartTransportFailure::ConnectionClosed,
+                "session_connection_closed",
+            ),
+        ];
+
+        for (failure, identifier) in expected {
+            let message = session_start_failure_message(
+                LiveTranscriptionClientError::SessionStartTransportFailed(failure),
+            );
+            assert_eq!(
+                message,
+                format!("The live transcription session could not be started ({identifier}).")
+            );
+            for forbidden in ["token", "ws://", "127.0.0.1", "payload", "secret-value"] {
+                assert!(!message.contains(forbidden));
+            }
+        }
     }
 
     #[test]
