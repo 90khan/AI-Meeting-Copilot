@@ -33,7 +33,7 @@ pub(crate) enum SimplificationLevel {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all(deserialize = "camelCase", serialize = "snake_case"))]
 pub(crate) struct AssistModeConfiguration {
     pub(crate) enabled: bool,
     pub(crate) translation_enabled: bool,
@@ -679,6 +679,25 @@ mod tests {
         AudioSource, ProtocolError, ServerMessage, SimplificationLevel,
     };
     use uuid::Uuid;
+
+    #[test]
+    fn deserializes_tauri_assist_configuration_in_camel_case() {
+        let configuration: AssistModeConfiguration = serde_json::from_str(
+            r#"{"enabled":false,"translationEnabled":false,"simplificationEnabled":false,"simplificationLevel":null,"replyCoachingEnabled":false}"#,
+        )
+        .expect("Tauri input deserializes");
+
+        assert_eq!(
+            configuration,
+            AssistModeConfiguration {
+                enabled: false,
+                translation_enabled: false,
+                simplification_enabled: false,
+                simplification_level: None,
+                reply_coaching_enabled: false,
+            }
+        );
+    }
 
     #[test]
     fn serializes_the_required_hello_shape() {
