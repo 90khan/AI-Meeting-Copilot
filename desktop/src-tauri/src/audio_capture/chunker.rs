@@ -5,9 +5,12 @@ use thiserror::Error;
 use super::mixer::MixedAudioFrame;
 
 pub(crate) const SAMPLE_RATE_HZ: usize = 16_000;
-pub(crate) const CHUNK_SAMPLES: usize = 32_000;
-pub(crate) const OVERLAP_SAMPLES: usize = 8_000;
+/// Four seconds of canonical audio give local Faster-Whisper enough sentence context.
+pub(crate) const CHUNK_SAMPLES: usize = 64_000;
+/// One second of overlap protects speech that crosses a chunk boundary.
+pub(crate) const OVERLAP_SAMPLES: usize = 16_000;
 pub(crate) const HOP_SAMPLES: usize = CHUNK_SAMPLES - OVERLAP_SAMPLES;
+pub(crate) const OVERLAP_SECONDS: f64 = 1.0;
 const SAMPLE_SECONDS: f64 = 1.0 / SAMPLE_RATE_HZ as f64;
 const GAP_TOLERANCE_SECONDS: f64 = 0.100;
 
@@ -27,8 +30,10 @@ pub(crate) struct ChunkingResult {
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub(crate) enum AudioChunkerError {
-    #[error("The mixed audio timeline is invalid.")]
-    InvalidTimeline,
+    #[error("The mixed audio frame is invalid.")]
+    InvalidFrame,
+    #[error("The mixed audio timeline regressed.")]
+    TimelineRegression,
 }
 
 pub(crate) struct AudioChunker {
@@ -58,13 +63,13 @@ impl AudioChunker {
             || frame.capture_time_seconds < 0.0
             || frame.samples.is_empty()
         {
-            return Err(AudioChunkerError::InvalidTimeline);
+            return Err(AudioChunkerError::InvalidFrame);
         }
         let mut gap_detected = false;
         if let Some(expected) = self.expected_next_time {
             let delta = frame.capture_time_seconds - expected;
             if delta < -SAMPLE_SECONDS {
-                return Err(AudioChunkerError::InvalidTimeline);
+                return Err(AudioChunkerError::TimelineRegression);
             }
             if delta.abs() > GAP_TOLERANCE_SECONDS {
                 self.samples.clear();
@@ -92,7 +97,7 @@ impl AudioChunker {
                 sequence: self.sequence,
                 capture_started_at_seconds: timestamp,
                 samples: self.samples[..CHUNK_SAMPLES].to_vec(),
-                overlap_seconds: 0.5,
+                overlap_seconds: OVERLAP_SECONDS,
             });
             self.sequence += 1;
             self.samples.drain(..HOP_SAMPLES);
@@ -106,11 +111,19 @@ impl AudioChunker {
         self.expected_next_time = None;
         self.sequence = 0;
     }
+
+    #[cfg(debug_assertions)]
+    pub(crate) const fn expected_next_time_for_diagnostics(&self) -> Option<f64> {
+        self.expected_next_time
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{AudioChunker, AudioChunkerError, CHUNK_SAMPLES, HOP_SAMPLES, OVERLAP_SAMPLES};
+    use super::{
+        AudioChunker, AudioChunkerError, CHUNK_SAMPLES, HOP_SAMPLES, OVERLAP_SAMPLES,
+        OVERLAP_SECONDS,
+    };
     use crate::audio_capture::mixer::MixedAudioFrame;
     fn frame(time: f64, count: usize, offset: usize) -> MixedAudioFrame {
         MixedAudioFrame {
@@ -137,8 +150,9 @@ mod tests {
             .remove(0);
         assert_eq!(first.sequence, 0);
         assert_eq!(first.samples.len(), CHUNK_SAMPLES);
+        assert_eq!(first.overlap_seconds, OVERLAP_SECONDS);
         let second = chunker
-            .push(frame(2.0, HOP_SAMPLES, CHUNK_SAMPLES))
+            .push(frame(4.0, HOP_SAMPLES, CHUNK_SAMPLES))
             .expect("push")
             .chunks
             .remove(0);
@@ -154,7 +168,7 @@ mod tests {
         chunker.push(frame(1.0, 100, 0)).expect("push");
         assert_eq!(
             chunker.push(frame(0.0, 10, 0)),
-            Err(AudioChunkerError::InvalidTimeline)
+            Err(AudioChunkerError::TimelineRegression)
         );
         assert!(
             chunker

@@ -66,6 +66,39 @@ def test_segment_messages_enforce_capability_specific_result_shapes() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("state", "expected_fields"),
+    [
+        (
+            AssistState.PROCESSING,
+            {"type", "version", "transcript_id", "capability", "state"},
+        ),
+        (
+            AssistState.FAILED,
+            {"type", "version", "transcript_id", "capability", "state"},
+        ),
+        (
+            AssistState.UNAVAILABLE,
+            {"type", "version", "transcript_id", "capability", "state"},
+        ),
+    ],
+)
+def test_non_ready_translation_messages_serialize_the_common_contract(
+    state: AssistState,
+    expected_fields: set[str],
+) -> None:
+    """Non-ready translation states carry no result or provider details."""
+
+    message = AssistSegmentUpdateMessage(
+        version=1,
+        transcript_id=_TRANSCRIPT_ID,
+        capability=AssistCapability.TRANSLATION,
+        state=state,
+    )
+
+    assert set(json.loads(serialize_assist_message(message))) == expected_fields
+
+
 def test_reply_messages_are_bounded_and_omit_results_until_ready() -> None:
     """Reply payloads contain at most two user-facing suggestions when ready."""
 

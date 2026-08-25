@@ -10,7 +10,7 @@ from pydantic import ValidationError
 def test_provider_settings_use_safe_defaults() -> None:
     """Every AI capability defaults to an explicit unconfigured provider."""
 
-    settings = Settings()
+    settings = Settings(_env_file=None)
 
     assert settings.speech_to_text_provider == "unconfigured"
     assert settings.translation_provider == "unconfigured"
@@ -79,6 +79,21 @@ def test_faster_whisper_settings_use_local_cpu_defaults() -> None:
     assert settings.faster_whisper_beam_size == 5
     assert settings.faster_whisper_vad_enabled is False
     assert settings.faster_whisper_download_directory is None
+
+
+def test_throughput_diagnostics_are_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Content-free throughput metrics remain disabled unless explicitly requested."""
+
+    assert (
+        Settings(throughput_diagnostics_enabled=False).throughput_diagnostics_enabled
+        is False
+    )
+
+    monkeypatch.setenv("AI_MEETING_COPILOT_THROUGHPUT_DIAGNOSTICS_ENABLED", "true")
+
+    assert Settings().throughput_diagnostics_enabled is True
 
 
 def test_faster_whisper_settings_read_prefixed_environment_overrides(

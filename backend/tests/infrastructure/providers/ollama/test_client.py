@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any, cast
 
+import app.infrastructure.providers.ollama.client as ollama_client_module
 import httpx
 import pytest
 from app.application.exceptions import (
@@ -13,6 +14,7 @@ from app.application.exceptions import (
     ProviderTimeoutError,
     ProviderUnavailableError,
 )
+from app.core.throughput_diagnostics import configure_throughput_diagnostics
 from app.infrastructure.providers.ollama import OllamaClient
 from ollama import ResponseError  # type: ignore[import-untyped]
 
@@ -159,6 +161,19 @@ def test_connection_failure_is_mapped_to_provider_unavailable() -> None:
         generate(client)
 
 
+def test_sdk_connection_failure_is_mapped_to_provider_unavailable() -> None:
+    """The official SDK's built-in connection error remains privacy-safe."""
+
+    client, _ = make_client(ConnectionError("daemon address must not leak"))
+
+    with pytest.raises(
+        ProviderUnavailableError, match="server is unavailable"
+    ) as error_info:
+        generate(client)
+
+    assert "daemon address must not leak" not in str(error_info.value)
+
+
 @pytest.mark.parametrize(
     ("status_code", "expected_error"),
     [
@@ -214,3 +229,65 @@ def test_close_is_idempotent_and_blocks_new_calls() -> None:
     assert fake_client.close_calls == 1
     with pytest.raises(ProviderUnavailableError, match="client is closed"):
         generate(client)
+
+
+def test_opt_in_throughput_metrics_exclude_prompt_and_response_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ollama diagnostics expose timing and in-flight count only."""
+
+    client, _ = make_client(FakeResponse(FakeMessage('{"value": "ok"}')))
+    events: list[tuple[str, dict[str, int | str]]] = []
+
+    def capture(stage: str, /, **fields: int | str) -> None:
+        events.append((stage, fields))
+
+    monkeypatch.setattr(ollama_client_module, "emit_throughput", capture)
+
+    configure_throughput_diagnostics(enabled=True)
+    try:
+        assert generate(client) == {"value": "ok"}
+    finally:
+        configure_throughput_diagnostics(enabled=False)
+
+    assert events[0] == ("ollama_started", {"active_requests": 1})
+    assert events[1] == ("ollama_response_received", {})
+    assert events[2][0] == "ollama_completed"
+    assert events[2][1]["outcome"] == "completed"
+    assert events[2][1]["active_requests"] == 0
+    assert isinstance(events[2][1]["elapsed_ms"], int)
+    assert all(
+        "prompt" not in fields and "response" not in fields for _, fields in events
+    )
+
+
+def test_malformed_response_metric_uses_only_a_closed_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Structured-response diagnostics never forward model output."""
+
+    client, _ = make_client(FakeResponse(FakeMessage("not-json")))
+    events: list[tuple[str, dict[str, int | str]]] = []
+
+    def capture(stage: str, /, **fields: int | str) -> None:
+        events.append((stage, fields))
+
+    monkeypatch.setattr(ollama_client_module, "emit_throughput", capture)
+
+    configure_throughput_diagnostics(enabled=True)
+    try:
+        with pytest.raises(InvalidProviderResponseError):
+            generate(client)
+    finally:
+        configure_throughput_diagnostics(enabled=False)
+
+    assert (
+        "ollama_response_validation_failed",
+        {"reason": "malformed_response"},
+    ) in events
+    assert events[-1][0] == "ollama_completed"
+    assert events[-1][1]["outcome"] == "failed"
+    assert events[-1][1]["reason"] == "malformed_response"
+    assert events[-1][1]["active_requests"] == 0
+    assert isinstance(events[-1][1]["elapsed_ms"], int)
+    assert all("not-json" not in str(fields) for _, fields in events)

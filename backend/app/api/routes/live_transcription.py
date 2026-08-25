@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import time
 from datetime import UTC, datetime
 from typing import Any, cast
 from uuid import UUID, uuid4
@@ -48,6 +49,11 @@ from app.application.services import (
     AssistModeOrchestrator,
 )
 from app.core.container import Container
+from app.core.logging import get_logger
+from app.core.throughput_diagnostics import (
+    emit_throughput,
+    estimate_v1_pcm16_wav_duration_ms,
+)
 from app.domain.exceptions import InvalidStateTransitionError
 
 router = APIRouter()
@@ -56,6 +62,7 @@ _HANDSHAKE_TIMEOUT_SECONDS = 5
 _MAX_SEQUENCE_VIOLATIONS = 3
 _PACKAGED_TAURI_ORIGINS = frozenset({"tauri://localhost", "http://tauri.localhost"})
 _DEBUG_VITE_ORIGINS = frozenset({"http://localhost:1420", "http://127.0.0.1:1420"})
+_LOGGER = get_logger(__name__)
 
 
 @router.websocket("/api/v1/live-transcription")
@@ -177,6 +184,13 @@ async def live_transcription(websocket: WebSocket) -> None:
                     sequence_violations = 0
                     assist_unavailable = False
                     if control.assist_mode is not None and control.assist_mode.enabled:
+                        _LOGGER.debug(
+                            "assist session configuration translation=%s "
+                            "simplification=%s reply_coaching=%s",
+                            control.assist_mode.translation_enabled,
+                            control.assist_mode.simplification_enabled,
+                            control.assist_mode.reply_coaching_enabled,
+                        )
                         try:
                             assist_orchestrator = (
                                 container.get_assist_mode_orchestrator(
@@ -205,6 +219,10 @@ async def live_transcription(websocket: WebSocket) -> None:
                             )
                             await assist_orchestrator.start()
                         except ProviderUnavailableError:
+                            _LOGGER.debug(
+                                "assist initialization unavailable "
+                                "capability=translation"
+                            )
                             assist_orchestrator = None
                             assist_unavailable = True
                         except Exception:
@@ -232,6 +250,30 @@ async def live_transcription(websocket: WebSocket) -> None:
                         )
                         is_closed = True
                         return
+                    assist_mode = control.assist_mode
+                    assist_enabled = assist_mode is not None and assist_mode.enabled
+                    translation_enabled = (
+                        assist_mode is not None
+                        and assist_mode.enabled
+                        and assist_mode.translation_enabled
+                    )
+                    simplification_enabled = (
+                        assist_mode is not None
+                        and assist_mode.enabled
+                        and assist_mode.simplification_enabled
+                    )
+                    reply_coaching_enabled = (
+                        assist_mode is not None
+                        and assist_mode.enabled
+                        and assist_mode.reply_coaching_enabled
+                    )
+                    emit_throughput(
+                        "session_started",
+                        assist="on" if assist_enabled else "off",
+                        translation="on" if translation_enabled else "off",
+                        simplification="on" if simplification_enabled else "off",
+                        reply_coaching="on" if reply_coaching_enabled else "off",
+                    )
                     if assist_unavailable:
                         await _send_protocol_error(
                             websocket,
@@ -319,9 +361,13 @@ async def live_transcription(websocket: WebSocket) -> None:
                 )
                 continue
 
+            chunk_request_started_at = time.monotonic()
             try:
                 metadata, wav_payload = parse_audio_chunk_frame(data)
             except ApplicationValidationError as error:
+                _LOGGER.debug(
+                    "live-transcription backend audio frame validation failed"
+                )
                 if "exceeds" in str(error):
                     await websocket.close(code=1009)
                     is_closed = True
@@ -337,6 +383,17 @@ async def live_transcription(websocket: WebSocket) -> None:
                 await websocket.close(code=4400)
                 is_closed = True
                 return
+
+            _LOGGER.debug(
+                "live-transcription backend audio frame validation succeeded "
+                "sequence=%d",
+                metadata.sequence,
+            )
+
+            if assist_orchestrator is not None:
+                assist_orchestrator.set_upstream_pending_stt_chunks(
+                    metadata.upstream_pending_chunks
+                )
 
             if (
                 metadata.session_id != session_id
@@ -358,7 +415,23 @@ async def live_transcription(websocket: WebSocket) -> None:
                     return
                 continue
 
+            chunk_received_at = time.monotonic()
+            emit_throughput(
+                "chunk_received",
+                sequence=metadata.sequence,
+                audio_duration_ms=estimate_v1_pcm16_wav_duration_ms(
+                    byte_length=metadata.byte_length,
+                    sample_rate_hz=metadata.sample_rate_hz,
+                    channels=metadata.channels,
+                ),
+                frame_parse_ms=_elapsed_milliseconds(chunk_request_started_at),
+                entry_monotonic_ms=_monotonic_milliseconds(chunk_request_started_at),
+            )
             try:
+                _LOGGER.debug(
+                    "live-transcription backend audio chunk received sequence=%d",
+                    metadata.sequence,
+                )
                 chunk = CapturedAudioChunk(
                     meeting_id=active_session.meeting_id,  # type: ignore[attr-defined]
                     sequence=metadata.sequence,
@@ -372,8 +445,35 @@ async def live_transcription(websocket: WebSocket) -> None:
                     source=metadata.source,
                     overlap_seconds=metadata.overlap_seconds,
                 )
+                _LOGGER.debug(
+                    "live-transcription session processing started sequence=%d",
+                    metadata.sequence,
+                )
                 result = await active_session.process_chunk(chunk)
+                emit_throughput(
+                    "backend_chunk",
+                    sequence=metadata.sequence,
+                    audio_duration_ms=estimate_v1_pcm16_wav_duration_ms(
+                        byte_length=metadata.byte_length,
+                        sample_rate_hz=metadata.sample_rate_hz,
+                        channels=metadata.channels,
+                    ),
+                    backend_queue_wait_ms=0,
+                    total_backend_ms=_elapsed_milliseconds(chunk_request_started_at),
+                )
+                _LOGGER.debug(
+                    "live-transcription session processing completed "
+                    "sequence=%d accepted_count=%d elapsed_ms=%d",
+                    metadata.sequence,
+                    len(result.accepted_segments),
+                    _elapsed_milliseconds(chunk_received_at),
+                )
             except ApplicationValidationError:
+                _LOGGER.debug(
+                    "live-transcription session processing failed "
+                    "stage=validation sequence=%d",
+                    metadata.sequence,
+                )
                 await _send_protocol_error(
                     websocket,
                     code="invalid_audio_frame",
@@ -386,6 +486,11 @@ async def live_transcription(websocket: WebSocket) -> None:
                 is_closed = True
                 return
             except ProviderError:
+                _LOGGER.debug(
+                    "live-transcription session processing failed "
+                    "stage=provider sequence=%d",
+                    metadata.sequence,
+                )
                 await _send_status(
                     websocket,
                     LiveTranscriptionStatus(
@@ -404,13 +509,43 @@ async def live_transcription(websocket: WebSocket) -> None:
                 )
                 continue
 
+            chunk_result_send_started_at = time.monotonic()
+            _LOGGER.debug(
+                "live-transcription backend chunk_result send started sequence=%d "
+                "accepted_count=%d elapsed_ms=%d",
+                result.chunk_sequence,
+                len(result.accepted_segments),
+                _elapsed_milliseconds(chunk_received_at),
+            )
             await _send_chunk_result(websocket, result)
+            emit_throughput(
+                "chunk_result_sent",
+                sequence=result.chunk_sequence,
+                accepted_count=len(result.accepted_segments),
+                elapsed_ms=_elapsed_milliseconds(chunk_result_send_started_at),
+            )
+            emit_throughput(
+                "backend_chunk_completed",
+                sequence=result.chunk_sequence,
+                backend_total_ms=_elapsed_milliseconds(chunk_request_started_at),
+            )
+            _LOGGER.debug(
+                "live-transcription backend chunk_result send completed "
+                "sequence=%d elapsed_ms=%d",
+                result.chunk_sequence,
+                _elapsed_milliseconds(chunk_result_send_started_at),
+            )
+            if result.accepted_segments:
+                _LOGGER.debug(
+                    "live-transcription transcript segment accepted count=%d",
+                    len(result.accepted_segments),
+                )
             if result.status is not None:
                 await _send_status(websocket, result.status)
             if assist_orchestrator is not None:
                 for processed_segment in result.accepted_segments:
                     try:
-                        await assist_orchestrator.enqueue(
+                        accepted = await assist_orchestrator.enqueue(
                             TranscriptSegment(
                                 transcript_id=processed_segment.transcript_id,
                                 meeting_id=active_session.meeting_id,  # type: ignore[attr-defined]
@@ -420,7 +555,12 @@ async def live_transcription(websocket: WebSocket) -> None:
                                 speaker=processed_segment.speaker,
                             )
                         )
+                        _LOGGER.debug(
+                            "assist transcript enqueue completed accepted=%s",
+                            accepted,
+                        )
                     except RuntimeError:
+                        _LOGGER.debug("assist transcript enqueue unavailable")
                         break
             expected_sequence += 1
     except WebSocketDisconnect:
@@ -617,6 +757,18 @@ def _serialize_timestamp(timestamp: datetime) -> str:
     """Render a UTC timestamp in the protocol's canonical Z form."""
 
     return timestamp.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _elapsed_milliseconds(started_at: float) -> int:
+    """Return a privacy-safe monotonic elapsed duration for debug diagnostics."""
+
+    return int((time.monotonic() - started_at) * 1_000)
+
+
+def _monotonic_milliseconds(timestamp: float) -> int:
+    """Render a process-local timing point without using capture timestamps."""
+
+    return int(timestamp * 1_000)
 
 
 async def _send_text(websocket: WebSocket, payload: str) -> None:

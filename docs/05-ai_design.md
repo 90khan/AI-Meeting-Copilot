@@ -234,11 +234,11 @@ Speech Recognition
 Transcript Buffer
 ```
 
-Small chunks reduce latency.
-
-Typical chunk duration:
-
-- 1–3 seconds
+Small chunks reduce latency, but independent local speech-recognition calls also
+need enough linguistic context. The current desktop live-transcription profile
+uses four-second PCM16 mono chunks with one second of overlap. This deliberately
+adds two seconds of audio acquisition before the first decode in exchange for
+materially better sentence continuity than the previous two-second profile.
 
 Long recordings should never wait for completion before processing.
 
@@ -324,6 +324,18 @@ Translation should never modify intent.
 Preferred output:
 
 Structured JSON.
+
+### Live translation scheduling
+
+Live speech-to-text is latency-critical. Translation is opportunistic
+best-effort work and must never delay or queue ahead of speech recognition.
+For translation-only Assist sessions, the waiting outer Assist work is a
+bounded latest-wins mailbox: a newly accepted transcript segment replaces only
+an older segment that has not started processing. This prevents stale
+translation requests from accumulating during continuous speech. An active
+translation remains associated with its own transcript segment and may be
+preempted safely when new STT work begins. Sessions that also enable
+simplification or reply coaching retain their bounded FIFO ordering semantics.
 
 Example:
 

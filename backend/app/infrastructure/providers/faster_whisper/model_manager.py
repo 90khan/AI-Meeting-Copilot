@@ -46,11 +46,22 @@ class FasterWhisperModelManager:
     def get_model(self) -> WhisperModel:
         """Return the cached model, loading it once when first requested."""
 
+        model, _ = self.get_model_with_load_state()
+        return model
+
+    def get_model_with_load_state(self) -> tuple[WhisperModel, bool]:
+        """Return the model and whether this call performed its lazy load.
+
+        This exposes only lifecycle state for opt-in latency diagnostics; it
+        does not change model construction, caching, or locking behavior.
+        """
+
         with self._lock:
+            loaded_on_this_call = self._model is None
             if self._model is None:
                 self._model = self._load_model()
 
-            return self._model
+            return self._model, loaded_on_this_call
 
     def close(self) -> None:
         """Release this manager's model reference without deleting model files."""

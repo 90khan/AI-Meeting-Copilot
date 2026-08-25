@@ -29,6 +29,136 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const HEALTH_RETRY_DELAY: Duration = Duration::from_millis(100);
 const MAX_READY_LINE_BYTES: usize = 8 * 1024;
 const MAX_DIAGNOSTICS: usize = 64;
+const THROUGHPUT_DIAGNOSTIC_MARKER: &str = "amcp-throughput ";
+const MAX_THROUGHPUT_DIAGNOSTIC_BYTES: usize = 512;
+
+const THROUGHPUT_STAGES: &[&str] = &[
+    "session_started",
+    "chunk_received",
+    "backend_chunk",
+    "backend_chunk_completed",
+    "stt_started",
+    "stt_completed",
+    "postprocess_completed",
+    "chunk_result_sent",
+    "stt_provider_started",
+    "stt_worker_started",
+    "stt_worker_completed",
+    "stt_model_ready",
+    "stt_audio_decode_conversion_completed",
+    "stt_inference_completed",
+    "stt_transcription_completed",
+    "stt_configuration",
+    "assist_enqueued",
+    "assist_dequeued",
+    "assist_outer_queue_coalesced",
+    "assist_capability_started",
+    "assist_capability_completed",
+    "assist_segment_completed",
+    "assist_translation_started",
+    "assist_translation_provider_resolved",
+    "assist_translation_provider_call_started",
+    "assist_translation_provider_call_failed",
+    "assist_translation_response_received",
+    "assist_translation_response_validation_failed",
+    "assist_translation_completed",
+    "assist_translation_update_ready",
+    "assist_translation_update_failed",
+    "assist_translation_scheduler",
+    "ollama_started",
+    "ollama_response_received",
+    "ollama_response_validation_failed",
+    "ollama_completed",
+];
+const THROUGHPUT_INTEGER_KEYS: &[&str] = &[
+    "sequence",
+    "ordinal",
+    "elapsed_ms",
+    "queue_wait_ms",
+    "queue_depth",
+    "replaced_count",
+    "accepted_count",
+    "active_requests",
+    "ollama_active_requests",
+    "audio_duration_ms",
+    "processed_audio_ms",
+    "frame_parse_ms",
+    "model_load_ms",
+    "audio_decode_conversion_ms",
+    "stt_inference_ms",
+    "backend_total_ms",
+    "entry_monotonic_ms",
+    "backend_queue_wait_ms",
+    "preprocessing_ms",
+    "stt_duration_ms",
+    "post_processing_ms",
+    "total_backend_ms",
+    "stt_rtf_milli",
+    "beam_size",
+    "cpu_threads",
+    "active_translation_count",
+    "pending_translation_count",
+    "upstream_pending_stt_chunks",
+    "estimated_idle_window_ms",
+    "estimated_translation_duration_ms",
+    "extended_idle_margin_ms",
+];
+const THROUGHPUT_SWITCH_KEYS: &[&str] =
+    &["assist", "translation", "simplification", "reply_coaching"];
+const THROUGHPUT_CAPABILITIES: &[&str] = &["translation", "simplification", "reply_coaching"];
+const THROUGHPUT_OUTCOMES: &[&str] = &["completed", "failed", "cancelled", "ready", "unavailable"];
+const THROUGHPUT_FIRST_REQUESTS: &[&str] = &["yes", "no"];
+const THROUGHPUT_MODEL_NAMES: &[&str] = &[
+    "tiny",
+    "tiny.en",
+    "base",
+    "base.en",
+    "small",
+    "small.en",
+    "medium",
+    "medium.en",
+    "large-v1",
+    "large-v2",
+    "large-v3",
+    "turbo",
+];
+const THROUGHPUT_DEVICES: &[&str] = &["cpu", "cuda", "auto"];
+const THROUGHPUT_COMPUTE_TYPES: &[&str] = &[
+    "auto",
+    "default",
+    "int8",
+    "int8_float16",
+    "int16",
+    "float16",
+    "float32",
+];
+const THROUGHPUT_EXECUTION_MODES: &[&str] = &["asyncio_to_thread"];
+const THROUGHPUT_SCHEDULER_STATES: &[&str] = &[
+    "started",
+    "busy",
+    "pending",
+    "deferred",
+    "coalesced",
+    "completed",
+    "cancelled",
+];
+const THROUGHPUT_ADMISSION_REASONS: &[&str] = &[
+    "probe",
+    "predicted_window",
+    "extended_idle",
+    "upstream_backlog",
+];
+const THROUGHPUT_REASONS: &[&str] = &[
+    "connection_failed",
+    "timeout",
+    "http_status_error",
+    "request_failed",
+    "model_unavailable",
+    "malformed_response",
+    "empty_response",
+    "response_validation_failed",
+    "provider_internal_error",
+];
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -245,6 +375,9 @@ impl SidecarManager {
         tauri::async_runtime::spawn(async move {
             let mut lines = BufReader::new(stderr).lines();
             while let Ok(Some(line)) = lines.next_line().await {
+                if let Some(throughput_diagnostic) = safe_throughput_diagnostic(&line) {
+                    eprintln!("{throughput_diagnostic}");
+                }
                 let diagnostic = redact_diagnostic(&line, &token);
                 let mut state = state.lock().await;
                 if state.diagnostics.len() == MAX_DIAGNOSTICS {
@@ -403,10 +536,67 @@ fn public_status(state: &ManagerState) -> BackendStatus {
     }
 }
 
+/// Extract one explicitly structured, developer-opt-in performance line from
+/// sidecar stderr. General backend diagnostics remain private to the sidecar
+/// manager; this parser accepts only numeric measurements and fixed enum
+/// labels, so transcript or provider content cannot cross this boundary.
+fn safe_throughput_diagnostic(line: &str) -> Option<String> {
+    let marker_index = line.find(THROUGHPUT_DIAGNOSTIC_MARKER)?;
+    if line[marker_index + THROUGHPUT_DIAGNOSTIC_MARKER.len()..]
+        .contains(THROUGHPUT_DIAGNOSTIC_MARKER)
+    {
+        return None;
+    }
+
+    let payload = line[marker_index + THROUGHPUT_DIAGNOSTIC_MARKER.len()..].trim_end();
+    if payload.is_empty() || payload.len() > MAX_THROUGHPUT_DIAGNOSTIC_BYTES || !payload.is_ascii()
+    {
+        return None;
+    }
+
+    let mut has_stage = false;
+    for token in payload.split(' ') {
+        let (key, value) = token.split_once('=')?;
+        if key.is_empty() || value.is_empty() || !is_safe_throughput_field(key, value) {
+            return None;
+        }
+        has_stage |= key == "stage";
+    }
+    if !has_stage {
+        return None;
+    }
+
+    Some(format!("{THROUGHPUT_DIAGNOSTIC_MARKER}{payload}"))
+}
+
+fn is_safe_throughput_field(key: &str, value: &str) -> bool {
+    match key {
+        "stage" => THROUGHPUT_STAGES.contains(&value),
+        "capability" => THROUGHPUT_CAPABILITIES.contains(&value),
+        "outcome" => THROUGHPUT_OUTCOMES.contains(&value),
+        "reason" => THROUGHPUT_REASONS.contains(&value),
+        "first_request" | "model_loaded" => THROUGHPUT_FIRST_REQUESTS.contains(&value),
+        "model_name" => THROUGHPUT_MODEL_NAMES.contains(&value),
+        "device" => THROUGHPUT_DEVICES.contains(&value),
+        "compute_type" => THROUGHPUT_COMPUTE_TYPES.contains(&value),
+        "vad" => matches!(value, "on" | "off"),
+        "execution_mode" => THROUGHPUT_EXECUTION_MODES.contains(&value),
+        "cpu_threads_configured" => THROUGHPUT_FIRST_REQUESTS.contains(&value),
+        "state" => THROUGHPUT_SCHEDULER_STATES.contains(&value),
+        "admission_reason" => THROUGHPUT_ADMISSION_REASONS.contains(&value),
+        key if THROUGHPUT_INTEGER_KEYS.contains(&key) => {
+            value.len() <= 20 && value.bytes().all(|byte| byte.is_ascii_digit())
+        }
+        key if THROUGHPUT_SWITCH_KEYS.contains(&key) => matches!(value, "on" | "off"),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        generate_auth_token, BackendStatus, LifecycleStatus, SidecarError, SidecarManager,
+        generate_auth_token, safe_throughput_diagnostic, BackendStatus, LifecycleStatus,
+        SidecarError, SidecarManager,
     };
 
     #[test]
@@ -434,6 +624,91 @@ mod tests {
             serialized,
             r#"{"status":"ready","host":"127.0.0.1","port":51842,"message":null}"#
         );
+    }
+
+    #[test]
+    fn forwards_only_allowlisted_throughput_measurements() {
+        let line = "2026-08-14T10:00:00+0000 | INFO | app.metrics | amcp-throughput stage=stt_completed sequence=40 elapsed_ms=5451 active_requests=1 ollama_active_requests=0 audio_duration_ms=4000 processed_audio_ms=3000 outcome=completed";
+
+        assert_eq!(
+            safe_throughput_diagnostic(line),
+            Some(
+                "amcp-throughput stage=stt_completed sequence=40 elapsed_ms=5451 active_requests=1 ollama_active_requests=0 audio_duration_ms=4000 processed_audio_ms=3000 outcome=completed"
+                    .to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn forwards_only_structural_cold_start_stt_measurements() {
+        let line = "amcp-throughput stage=stt_model_ready ordinal=1 model_load_ms=14000 model_loaded=yes first_request=yes";
+
+        assert_eq!(safe_throughput_diagnostic(line), Some(line.to_owned()));
+    }
+
+    #[test]
+    fn forwards_only_allowlisted_stt_runtime_configuration() {
+        let line = "amcp-throughput stage=stt_configuration model_name=small device=cpu compute_type=int8 beam_size=5 vad=off execution_mode=asyncio_to_thread cpu_threads_configured=no";
+
+        assert_eq!(safe_throughput_diagnostic(line), Some(line.to_owned()));
+        assert_eq!(
+            safe_throughput_diagnostic(
+                "amcp-throughput stage=stt_configuration model_name=/private/model"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn forwards_only_allowlisted_assist_translation_failure_metrics() {
+        let line = "amcp-throughput stage=ollama_completed outcome=failed elapsed_ms=120 reason=model_unavailable";
+
+        assert_eq!(safe_throughput_diagnostic(line), Some(line.to_owned()));
+        assert_eq!(
+            safe_throughput_diagnostic(
+                "amcp-throughput stage=ollama_completed outcome=failed reason=private_detail"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn forwards_only_allowlisted_translation_scheduler_metrics() {
+        let line = "amcp-throughput stage=assist_translation_scheduler state=deferred active_translation_count=0 pending_translation_count=1 upstream_pending_stt_chunks=3 admission_reason=upstream_backlog estimated_idle_window_ms=900 estimated_translation_duration_ms=1500 extended_idle_margin_ms=250";
+
+        assert_eq!(safe_throughput_diagnostic(line), Some(line.to_owned()));
+        assert_eq!(
+            safe_throughput_diagnostic(
+                "amcp-throughput stage=assist_translation_scheduler admission_reason=private_detail"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn forwards_only_allowlisted_translation_only_coalescing_metrics() {
+        let line = "amcp-throughput stage=assist_outer_queue_coalesced capability=translation replaced_count=1 queue_depth=1";
+
+        assert_eq!(safe_throughput_diagnostic(line), Some(line.to_owned()));
+        assert_eq!(
+            safe_throughput_diagnostic(
+                "amcp-throughput stage=assist_outer_queue_coalesced capability=private replaced_count=1"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn rejects_non_structural_throughput_payloads() {
+        let transcript = "amcp-throughput stage=stt_completed sequence=40 text=secret";
+        let invalid_stage = "amcp-throughput stage=unknown sequence=40";
+        let provider_detail = "amcp-throughput stage=ollama_completed outcome=backend_error";
+        let missing_stage = "amcp-throughput elapsed_ms=12";
+
+        assert_eq!(safe_throughput_diagnostic(transcript), None);
+        assert_eq!(safe_throughput_diagnostic(invalid_stage), None);
+        assert_eq!(safe_throughput_diagnostic(provider_detail), None);
+        assert_eq!(safe_throughput_diagnostic(missing_stage), None);
     }
 
     #[tokio::test]

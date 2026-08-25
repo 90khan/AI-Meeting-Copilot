@@ -179,6 +179,33 @@ def test_launcher_passes_the_prebound_socket_and_runs_lifespan(
     assert json.loads(output.getvalue())["type"] == "ready"
 
 
+def test_launcher_configures_opt_in_throughput_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The sidecar enables only the explicitly configured safe metric stream."""
+
+    configured: list[bool] = []
+    output = io.StringIO()
+    fake_socket = FakeListeningSocket()
+    fake_socket.bind(("127.0.0.1", 0))
+    monkeypatch.setattr(sidecar, "create_listening_socket", lambda **_: fake_socket)
+    monkeypatch.setattr(
+        sidecar,
+        "configure_throughput_diagnostics",
+        lambda *, enabled: configured.append(enabled),
+    )
+
+    asyncio.run(
+        sidecar.run_sidecar(
+            _settings(throughput_diagnostics_enabled=True),
+            stdout=output,
+            server_factory=FakeServer,
+        )
+    )
+
+    assert configured == [True]
+
+
 def test_launcher_closes_socket_when_server_startup_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

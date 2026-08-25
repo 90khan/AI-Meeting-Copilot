@@ -6,17 +6,20 @@ import socket
 import sys
 from collections.abc import Callable
 from contextlib import suppress
+from pathlib import Path
 from typing import Protocol, TextIO
 
 import uvicorn
 
 from app.core.config import Settings, get_settings
-from app.core.logging import setup_logging
+from app.core.logging import get_logger, setup_logging
+from app.core.throughput_diagnostics import configure_throughput_diagnostics
 from app.main import create_app
 
 _READINESS_VERSION = 1
 _PROTOCOL_VERSION = 1
 _LISTEN_BACKLOG = 128
+_LOGGER = get_logger(__name__)
 
 
 class _Server(Protocol):
@@ -44,6 +47,19 @@ async def run_sidecar(
         raise RuntimeError("Sidecar authentication token must be configured.")
 
     setup_logging(resolved_settings, stream=sys.stderr)
+    configure_throughput_diagnostics(
+        enabled=resolved_settings.throughput_diagnostics_enabled
+    )
+    _LOGGER.debug(
+        "sidecar runtime source=repository_worktree env_file=%s "
+        "translation_provider=%s translation_model=%s "
+        "simplification_provider=%s reply_coaching_provider=%s",
+        _settings_env_file_source(),
+        resolved_settings.translation_provider,
+        resolved_settings.ollama_translation_model,
+        resolved_settings.german_simplification_provider,
+        resolved_settings.reply_coaching_provider,
+    )
     listening_socket = create_listening_socket(
         host=resolved_settings.sidecar_host,
         port=resolved_settings.sidecar_port,
@@ -97,6 +113,18 @@ def create_listening_socket(*, host: str, port: int) -> socket.socket:
         listening_socket.close()
         raise
     return listening_socket
+
+
+def _settings_env_file_source() -> str:
+    """Classify the configured dotenv source without exposing a filesystem path."""
+
+    configured = Settings.model_config.get("env_file")
+    if not isinstance(configured, Path) or not configured.exists():
+        return "no_env_file"
+    repository_root_env = Path(__file__).resolve().parents[2] / ".env"
+    if configured.resolve() == repository_root_env.resolve():
+        return "repository_root_env"
+    return "other_config_source"
 
 
 def write_readiness(*, host: str, port: int, output: TextIO | None = None) -> None:

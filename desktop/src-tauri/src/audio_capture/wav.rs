@@ -67,14 +67,14 @@ pub(crate) fn encode_audio_chunk(
 #[cfg(test)]
 mod tests {
     use super::{build_wav_bytes, encode_audio_chunk, HEADER_BYTES};
-    use crate::audio_capture::chunker::{AudioChunk, CHUNK_SAMPLES};
+    use crate::audio_capture::chunker::{AudioChunk, CHUNK_SAMPLES, OVERLAP_SECONDS};
     #[test]
     fn builds_complete_pcm16_mono_wav_and_preserves_metadata() {
         let chunk = AudioChunk {
             sequence: 4,
             capture_started_at_seconds: 2.0,
             samples: vec![0.0; CHUNK_SAMPLES],
-            overlap_seconds: 0.5,
+            overlap_seconds: OVERLAP_SECONDS,
         };
         let encoded = encode_audio_chunk(chunk).expect("encodes");
         let wav = &encoded.wav_payload;
@@ -96,7 +96,7 @@ mod tests {
             sequence: 0,
             capture_started_at_seconds: 0.0,
             samples: vec![],
-            overlap_seconds: 0.5,
+            overlap_seconds: OVERLAP_SECONDS,
         };
         assert!(build_wav_bytes(&chunk).is_err());
     }

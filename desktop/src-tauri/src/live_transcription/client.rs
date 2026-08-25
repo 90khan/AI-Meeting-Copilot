@@ -5,7 +5,7 @@
 use std::{
     fmt,
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use futures_util::{SinkExt, StreamExt};
@@ -16,16 +16,18 @@ use thiserror::Error;
 use tokio::{
     net::TcpStream,
     sync::{mpsc, oneshot, Mutex},
-    time::{timeout, Duration},
+    time::{sleep, timeout, Duration},
 };
 use tokio_tungstenite::{
     connect_async, tungstenite::protocol::Message, MaybeTlsStream, WebSocketStream,
 };
 use uuid::Uuid;
 
-use crate::assist_mode::events::AssistEventSink;
+use crate::assist_mode::events::{AssistEventSink, AssistSegmentCapability, AssistUpdateState};
 use crate::{assist_mode::events::TranscriptSegmentEvent, sidecar::manager::SidecarManager};
 
+#[cfg(debug_assertions)]
+use super::protocol::classify_server_message_failure;
 use super::{
     binary_frames::{build_audio_chunk_frame, AudioChunkFrameMetadata, BinaryFrameError},
     protocol::{
@@ -35,12 +37,44 @@ use super::{
 };
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+/// A result that exceeds this budget is slow, but still has a bounded chance
+/// to complete on the same strictly sequential AMCP request.
+const CHUNK_RESULT_LATENCY_BUDGET: Duration = Duration::from_secs(10);
+/// The absolute result deadline for one in-flight chunk. Keeping this finite
+/// prevents a permanently stalled backend request from holding the only AMCP
+/// sequence forever.
+const CHUNK_RESULT_HARD_TIMEOUT: Duration = Duration::from_secs(20);
 const LIVE_TRANSCRIPTION_PATH: &str = "/api/v1/live-transcription";
 
 type LocalSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 type LocalWriter = futures_util::stream::SplitSink<LocalSocket, Message>;
 type LocalReader = futures_util::stream::SplitStream<LocalSocket>;
 type InboundMessage = Result<ServerMessage, LiveTranscriptionClientError>;
+
+/// Classifies WebSocket framing independently from the application protocol.
+///
+/// Ping and Pong are valid transport-control frames, not server protocol
+/// messages. All application messages remain UTF-8 WebSocket text frames.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InboundWebSocketFrameKind {
+    Text,
+    Ping,
+    Pong,
+    Close,
+    UnexpectedBinary,
+    UnexpectedFrame,
+}
+
+fn inbound_websocket_frame_kind(message: &Message) -> InboundWebSocketFrameKind {
+    match message {
+        Message::Text(_) => InboundWebSocketFrameKind::Text,
+        Message::Ping(_) => InboundWebSocketFrameKind::Ping,
+        Message::Pong(_) => InboundWebSocketFrameKind::Pong,
+        Message::Close(_) => InboundWebSocketFrameKind::Close,
+        Message::Binary(_) => InboundWebSocketFrameKind::UnexpectedBinary,
+        Message::Frame(_) => InboundWebSocketFrameKind::UnexpectedFrame,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LiveTranscriptionConnectStage {
@@ -168,6 +202,8 @@ pub enum LiveTranscriptionClientError {
     InvalidSequence,
     #[error("The live transcription connection failed.")]
     ConnectionFailed,
+    #[error("The audio chunk result timed out.")]
+    ChunkResultTimeout,
     #[error("The live transcription connection could not be established ({0}).")]
     ConnectionFailedAt(LiveTranscriptionConnectStage),
     #[error("The live transcription session could not be started ({0}).")]
@@ -211,6 +247,13 @@ struct PendingChunk {
         oneshot::Sender<Result<super::protocol::ChunkResponse, LiveTranscriptionClientError>>,
 }
 
+/// Retains only the sequence and monotonic timeout instant needed to identify
+/// a result that arrives after the caller has stopped awaiting it.
+struct TimedOutChunk {
+    sequence: u64,
+    timed_out_at: Instant,
+}
+
 struct PendingEnd {
     request_id: Uuid,
     session_id: Uuid,
@@ -224,6 +267,7 @@ struct ClientState {
     pending_start: Option<PendingStart>,
     pending_chunk: Option<PendingChunk>,
     pending_end: Option<PendingEnd>,
+    timed_out_chunk: Option<TimedOutChunk>,
     status: LiveTranscriptionLifecycleStatus,
     message: Option<String>,
     connection_stage: Option<LiveTranscriptionConnectStage>,
@@ -240,6 +284,7 @@ impl Default for ClientState {
             pending_start: None,
             pending_chunk: None,
             pending_end: None,
+            timed_out_chunk: None,
             status: LiveTranscriptionLifecycleStatus::Disconnected,
             message: None,
             connection_stage: None,
@@ -349,7 +394,7 @@ impl LiveTranscriptionClient {
         let (writer, reader) = socket.split();
         let writer = Arc::new(Mutex::new(writer));
         let (inbound_sender, inbound_receiver) = mpsc::channel(16);
-        let reader_task = tokio::spawn(run_reader(reader, inbound_sender));
+        let reader_task = tokio::spawn(run_reader(reader, Arc::clone(&writer), inbound_sender));
         let dispatcher_task = tokio::spawn(run_dispatcher(
             inbound_receiver,
             Arc::clone(&self.state),
@@ -662,6 +707,15 @@ impl LiveTranscriptionClient {
         source: AudioSource,
         assist_mode: AssistModeConfiguration,
     ) -> Result<(), LiveTranscriptionClientError> {
+        #[cfg(debug_assertions)]
+        eprintln!(
+            "assist session request enabled={} translation={} simplification={} reply_coaching={} level={}",
+            assist_mode.enabled,
+            assist_mode.translation_enabled,
+            assist_mode.simplification_enabled,
+            assist_mode.reply_coaching_enabled,
+            assist_simplification_level_name(assist_mode.simplification_level),
+        );
         let _operation = self.operation_lock.lock().await;
         let request_id = Uuid::new_v4();
         let control =
@@ -750,25 +804,35 @@ impl LiveTranscriptionClient {
         &self,
         capture_started_at_seconds: f64,
         overlap_seconds: f64,
+        upstream_pending_chunks: u8,
         wav_payload: Vec<u8>,
     ) -> Result<ChunkSubmissionResult, LiveTranscriptionClientError> {
         if !capture_started_at_seconds.is_finite() || capture_started_at_seconds < 0.0 {
+            #[cfg(debug_assertions)]
+            eprintln!("live-transcription chunk submission failed stage=state_validation");
             return Err(LiveTranscriptionClientError::InvalidTimestamp);
         }
         let state = self.state.lock().await;
         if state.status != LiveTranscriptionLifecycleStatus::SessionActive {
+            #[cfg(debug_assertions)]
+            eprintln!("live-transcription chunk submission failed stage=state_validation");
             return Err(LiveTranscriptionClientError::SessionNotActive);
         }
-        let session = state
-            .session
-            .as_ref()
-            .ok_or(LiveTranscriptionClientError::SessionNotActive)?;
+        let session = state.session.as_ref().ok_or_else(|| {
+            #[cfg(debug_assertions)]
+            eprintln!("live-transcription chunk submission failed stage=state_validation");
+            LiveTranscriptionClientError::SessionNotActive
+        })?;
         if session.in_flight {
+            #[cfg(debug_assertions)]
+            eprintln!("live-transcription chunk submission failed stage=state_validation");
             return Err(LiveTranscriptionClientError::SessionNotActive);
         }
         if capture_started_at_seconds + f64::EPSILON < session.last_capture_started_at_seconds
             || capture_started_at_seconds < session.anchor_monotonic_seconds
         {
+            #[cfg(debug_assertions)]
+            eprintln!("live-transcription chunk submission failed stage=state_validation");
             return Err(LiveTranscriptionClientError::InvalidTimestamp);
         }
         let utc_seconds = session.anchor_utc_unix_seconds
@@ -781,6 +845,7 @@ impl LiveTranscriptionClient {
             sample_rate_hz: 16_000,
             channels: 1,
             overlap_seconds,
+            upstream_pending_chunks,
             byte_length: wav_payload.len(),
         };
         drop(state);
@@ -913,19 +978,51 @@ impl LiveTranscriptionClient {
         let _operation = self.operation_lock.lock().await;
         let (writer, receiver, frame) = {
             let mut state = self.state.lock().await;
-            validate_chunk_admission(&state, &metadata)?;
+            if let Err(error) = validate_chunk_admission(&state, &metadata) {
+                #[cfg(debug_assertions)]
+                eprintln!(
+                    "live-transcription chunk submission failed stage=state_validation sequence={}",
+                    metadata.sequence
+                );
+                return Err(error);
+            }
             if state.pending_chunk.is_some() {
+                #[cfg(debug_assertions)]
+                eprintln!(
+                    "live-transcription chunk submission failed stage=state_validation sequence={}",
+                    metadata.sequence
+                );
                 return Err(LiveTranscriptionClientError::AlreadyActive);
             }
-            let frame =
-                build_audio_chunk_frame(&metadata, wav_payload, state.max_binary_payload_bytes)
-                    .map_err(map_binary_error)?;
+            let frame = match build_audio_chunk_frame(
+                &metadata,
+                wav_payload,
+                state.max_binary_payload_bytes,
+            ) {
+                Ok(frame) => frame,
+                Err(error) => {
+                    #[cfg(debug_assertions)]
+                    eprintln!(
+                        "live-transcription chunk submission failed stage=protocol_construction sequence={}",
+                        metadata.sequence
+                    );
+                    return Err(map_binary_error(error));
+                }
+            };
             let writer = state
                 .writer
                 .as_ref()
                 .cloned()
-                .ok_or(LiveTranscriptionClientError::NotConnected)?;
+                .ok_or_else(|| {
+                    #[cfg(debug_assertions)]
+                    eprintln!(
+                        "live-transcription chunk submission failed stage=websocket_sink_acquisition sequence={}",
+                        metadata.sequence
+                    );
+                    LiveTranscriptionClientError::NotConnected
+                })?;
             let (sender, receiver) = oneshot::channel();
+            state.timed_out_chunk = None;
             state.pending_chunk = Some(PendingChunk {
                 sequence: metadata.sequence,
                 responder: sender,
@@ -945,12 +1042,20 @@ impl LiveTranscriptionClient {
             .await
             .is_err()
         {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "live-transcription chunk submission failed stage=websocket_send sequence={}",
+                metadata.sequence
+            );
             self.clear_pending_chunk(metadata.sequence).await;
             return Err(self.mark_failed().await);
         }
-        match wait_for_response(receiver).await {
+        match wait_for_chunk_response(receiver, metadata.sequence).await {
             Ok(response) => Ok(response),
-            Err(error) => {
+            Err(ChunkResponseWaitFailure::HardTimeout) => Err(self
+                .mark_chunk_result_timeout_failed(metadata.sequence)
+                .await),
+            Err(ChunkResponseWaitFailure::Response(error)) => {
                 self.clear_pending_chunk(metadata.sequence).await;
                 Err(error)
             }
@@ -973,6 +1078,18 @@ impl LiveTranscriptionClient {
         }
     }
 
+    /// Fail closed after the absolute chunk-result deadline. A timed-out
+    /// sequence must never be reused: the backend may still complete it after
+    /// the caller has stopped waiting.
+    async fn mark_chunk_result_timeout_failed(
+        &self,
+        sequence: u64,
+    ) -> LiveTranscriptionClientError {
+        let mut state = self.state.lock().await;
+        mark_chunk_result_timeout_failed_state(&mut state, sequence);
+        LiveTranscriptionClientError::ChunkResultTimeout
+    }
+
     async fn complete_chunk(
         &self,
         sequence: u64,
@@ -991,6 +1108,7 @@ impl LiveTranscriptionClient {
             session.last_capture_started_at_seconds = timestamp;
         }
         session.in_flight = false;
+        state.timed_out_chunk = None;
         Ok(())
     }
 }
@@ -1218,7 +1336,8 @@ fn session_start_failure_message(error: LiveTranscriptionClientError) -> String 
         LiveTranscriptionClientError::SessionNotActive => "session_not_active".to_owned(),
         LiveTranscriptionClientError::InvalidSequence => "session_invalid_sequence".to_owned(),
         LiveTranscriptionClientError::ConnectionFailed
-        | LiveTranscriptionClientError::ConnectionFailedAt(_) => {
+        | LiveTranscriptionClientError::ConnectionFailedAt(_)
+        | LiveTranscriptionClientError::ChunkResultTimeout => {
             "session_connection_failed".to_owned()
         }
         LiveTranscriptionClientError::SessionStartFailedAt(stage) => stage.to_string(),
@@ -1363,6 +1482,17 @@ pub async fn get_live_transcription_status(
     Ok(client.status().await)
 }
 
+#[cfg(debug_assertions)]
+const fn assist_simplification_level_name(
+    level: Option<super::protocol::SimplificationLevel>,
+) -> &'static str {
+    match level {
+        Some(super::protocol::SimplificationLevel::B1) => "b1",
+        Some(super::protocol::SimplificationLevel::B2) => "b2",
+        None => "none",
+    }
+}
+
 async fn receive_hello_ack(
     socket: &mut LocalSocket,
 ) -> Result<super::protocol::HelloAck, HelloAckFailure> {
@@ -1376,17 +1506,79 @@ async fn receive_hello_ack(
     }
 }
 
-async fn run_reader(mut reader: LocalReader, inbound: mpsc::Sender<InboundMessage>) {
+async fn run_reader(
+    mut reader: LocalReader,
+    writer: Arc<Mutex<LocalWriter>>,
+    inbound: mpsc::Sender<InboundMessage>,
+) {
     loop {
         let parsed = match reader.next().await {
-            Some(Ok(Message::Text(text))) => parse_server_message(&text)
-                .map_err(|_| LiveTranscriptionClientError::ProtocolFailed),
-            Some(Ok(Message::Close(_))) | None => {
-                Err(LiveTranscriptionClientError::ConnectionFailed)
-            }
-            Some(Ok(_)) => Err(LiveTranscriptionClientError::ProtocolFailed),
+            Some(Ok(message)) => match inbound_websocket_frame_kind(&message) {
+                InboundWebSocketFrameKind::Text => {
+                    let Message::Text(text) = message else {
+                        unreachable!("text frame classification must match Message::Text");
+                    };
+                    match parse_server_message(&text) {
+                        Ok(message) => Ok(message),
+                        Err(_) => {
+                            #[cfg(debug_assertions)]
+                            {
+                                let (message_type, reason) = classify_server_message_failure(&text);
+                                let boundary = if reason == "invalid_json" {
+                                    "json_decode"
+                                } else {
+                                    "server_message_parse"
+                                };
+                                eprintln!(
+                                    "live-transcription inbound_protocol_failed boundary={boundary} message_type={message_type} reason={reason}"
+                                );
+                            }
+                            Err(LiveTranscriptionClientError::ProtocolFailed)
+                        }
+                    }
+                }
+                InboundWebSocketFrameKind::Ping => {
+                    // Tungstenite queues the mandatory Pong while reading the Ping. The
+                    // split sink owns writes, so flush it explicitly before resuming the
+                    // dedicated reader rather than treating a valid heartbeat as an
+                    // application-protocol failure.
+                    if writer.lock().await.flush().await.is_err() {
+                        Err(LiveTranscriptionClientError::ConnectionFailed)
+                    } else {
+                        continue;
+                    }
+                }
+                InboundWebSocketFrameKind::Pong => continue,
+                InboundWebSocketFrameKind::Close => {
+                    Err(LiveTranscriptionClientError::ConnectionFailed)
+                }
+                InboundWebSocketFrameKind::UnexpectedBinary => {
+                    #[cfg(debug_assertions)]
+                    eprintln!(
+                        "live-transcription inbound_protocol_failed boundary=unexpected_frame_type frame_type=binary"
+                    );
+                    Err(LiveTranscriptionClientError::ProtocolFailed)
+                }
+                InboundWebSocketFrameKind::UnexpectedFrame => {
+                    #[cfg(debug_assertions)]
+                    eprintln!(
+                        "live-transcription inbound_protocol_failed boundary=unexpected_frame_type frame_type=frame"
+                    );
+                    Err(LiveTranscriptionClientError::ProtocolFailed)
+                }
+            },
+            None => Err(LiveTranscriptionClientError::ConnectionFailed),
             Some(Err(_)) => Err(LiveTranscriptionClientError::ConnectionFailed),
         };
+        #[cfg(debug_assertions)]
+        if let Err(error) = &parsed {
+            let stage = match error {
+                LiveTranscriptionClientError::ProtocolFailed => "inbound_protocol",
+                LiveTranscriptionClientError::ConnectionFailed => "connection_closed",
+                _ => "inbound_transport",
+            };
+            eprintln!("live-transcription reader failed stage={stage}");
+        }
         let terminal = parsed.is_err();
         if inbound.send(parsed).await.is_err() || terminal {
             return;
@@ -1460,17 +1652,35 @@ async fn dispatch_message(
             chunk_sequence,
             response,
         }) => {
-            let responder = {
+            let (responder, late_elapsed_ms) = {
                 let mut state = state.lock().await;
                 match state.pending_chunk.take() {
-                    Some(pending) if pending.sequence == chunk_sequence => Some(pending.responder),
+                    Some(pending) if pending.sequence == chunk_sequence => {
+                        (Some(pending.responder), None)
+                    }
                     pending => {
                         state.pending_chunk = pending;
-                        None
+                        let late_elapsed_ms = state
+                            .timed_out_chunk
+                            .as_ref()
+                            .filter(|timed_out| timed_out.sequence == chunk_sequence)
+                            .map(|timed_out| timed_out.timed_out_at.elapsed().as_millis());
+                        if late_elapsed_ms.is_some() {
+                            state.timed_out_chunk = None;
+                        }
+                        (None, late_elapsed_ms)
                     }
                 }
             };
+            #[cfg(not(debug_assertions))]
+            let _ = late_elapsed_ms;
             if let Some(responder) = responder {
+                #[cfg(debug_assertions)]
+                eprintln!(
+                    "live-transcription chunk result received sequence={} accepted_count={}",
+                    chunk_sequence,
+                    response.accepted_segments.len()
+                );
                 // A missing sink is a deliberate no-op during non-Tauri tests. A real
                 // delivery failure is fatal: losing finalized transcript events would
                 // desynchronize the desktop from persisted backend state.
@@ -1482,6 +1692,17 @@ async fn dispatch_message(
                     return true;
                 }
                 let _ = responder.send(Ok(response));
+            } else {
+                #[cfg(debug_assertions)]
+                if let Some(elapsed_ms) = late_elapsed_ms {
+                    eprintln!(
+                        "live-transcription chunk_result received sequence={chunk_sequence} correlation=late_after_timeout elapsed_ms={elapsed_ms}"
+                    );
+                } else {
+                    eprintln!(
+                        "live-transcription chunk_result received sequence={chunk_sequence} correlation=unmatched"
+                    );
+                }
             }
             false
         }
@@ -1508,6 +1729,13 @@ async fn dispatch_message(
         }
         Ok(ServerMessage::Error(error)) => {
             let mut state = state.lock().await;
+            #[cfg(debug_assertions)]
+            if state.pending_chunk.is_some() {
+                eprintln!(
+                    "live-transcription chunk submission failed stage=backend_protocol_error fatal={}",
+                    error.fatal
+                );
+            }
             let operation_error = error
                 .session_start_stage
                 .map(|stage| LiveTranscriptionClientError::SessionStartFailedAt(stage.into()))
@@ -1524,10 +1752,28 @@ async fn dispatch_message(
                 false
             }
         }
-        Ok(
-            message @ (ServerMessage::AssistSegmentUpdate(_)
-            | ServerMessage::AssistReplySuggestions(_)),
-        ) => {
+        Ok(message @ ServerMessage::AssistSegmentUpdate(_)) => {
+            #[cfg(debug_assertions)]
+            if let ServerMessage::AssistSegmentUpdate(event) = &message {
+                eprintln!(
+                    "assist update received capability={} state={}",
+                    assist_capability_name(event.capability),
+                    assist_update_state_name(event.state),
+                );
+            }
+            if !event_routing_enabled(state).await
+                || emit_assist_event(event_sink, message).await.is_err()
+            {
+                if event_routing_enabled(state).await {
+                    let mut state = state.lock().await;
+                    fail_pending_operations(&mut state);
+                    mark_failed_state(&mut state);
+                    return true;
+                }
+            }
+            false
+        }
+        Ok(message @ ServerMessage::AssistReplySuggestions(_)) => {
             if !event_routing_enabled(state).await
                 || emit_assist_event(event_sink, message).await.is_err()
             {
@@ -1557,6 +1803,126 @@ async fn wait_for_response<T>(
         Ok(Err(_)) => Err(LiveTranscriptionClientError::ConnectionFailed),
         Err(_) => Err(LiveTranscriptionClientError::ConnectionFailed),
     }
+}
+
+/// Internal wait outcome that preserves the existing public error while
+/// allowing the caller to retain a safe late-result diagnostic marker.
+enum ChunkResponseWaitFailure {
+    Response(LiveTranscriptionClientError),
+    HardTimeout,
+}
+
+/// Wait for one finalized chunk result while preserving AMCP's one-in-flight
+/// sequence rule. The soft budget is observable only: its receiver remains
+/// alive during the bounded recovery period, so a slow valid result cannot be
+/// mistaken for a failed transport and allow the next sequence to overtake it.
+async fn wait_for_chunk_response(
+    receiver: oneshot::Receiver<
+        Result<super::protocol::ChunkResponse, LiveTranscriptionClientError>,
+    >,
+    sequence: u64,
+) -> Result<super::protocol::ChunkResponse, ChunkResponseWaitFailure> {
+    wait_for_chunk_response_with_timeouts(
+        receiver,
+        sequence,
+        CHUNK_RESULT_LATENCY_BUDGET,
+        CHUNK_RESULT_HARD_TIMEOUT,
+    )
+    .await
+}
+
+async fn wait_for_chunk_response_with_timeouts(
+    receiver: oneshot::Receiver<
+        Result<super::protocol::ChunkResponse, LiveTranscriptionClientError>,
+    >,
+    sequence: u64,
+    latency_budget: Duration,
+    hard_timeout: Duration,
+) -> Result<super::protocol::ChunkResponse, ChunkResponseWaitFailure> {
+    debug_assert!(latency_budget <= hard_timeout);
+    let wait_started_at = Instant::now();
+    let mut receiver = receiver;
+    let soft_deadline = sleep(latency_budget);
+    let hard_deadline = sleep(hard_timeout);
+    tokio::pin!(soft_deadline);
+    tokio::pin!(hard_deadline);
+
+    #[cfg(debug_assertions)]
+    eprintln!(
+        "live-transcription chunk_result wait started sequence={sequence} timeout_ms={} hard_timeout_ms={}",
+        latency_budget.as_millis(),
+        hard_timeout.as_millis(),
+    );
+    tokio::select! {
+        response = &mut receiver => resolve_chunk_response(response, sequence, wait_started_at),
+        _ = &mut soft_deadline => {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "live-transcription chunk result slow sequence={sequence} elapsed_ms={}",
+                wait_started_at.elapsed().as_millis(),
+            );
+            tokio::select! {
+                response = receiver => resolve_chunk_response(response, sequence, wait_started_at),
+                _ = &mut hard_deadline => chunk_response_hard_timeout(sequence, wait_started_at),
+            }
+        }
+        _ = &mut hard_deadline => chunk_response_hard_timeout(sequence, wait_started_at),
+    }
+}
+
+fn resolve_chunk_response(
+    response: Result<
+        Result<super::protocol::ChunkResponse, LiveTranscriptionClientError>,
+        oneshot::error::RecvError,
+    >,
+    sequence: u64,
+    wait_started_at: Instant,
+) -> Result<super::protocol::ChunkResponse, ChunkResponseWaitFailure> {
+    match response {
+        Ok(Ok(response)) => {
+            #[cfg(debug_assertions)]
+            {
+                let elapsed_ms = wait_started_at.elapsed().as_millis();
+                eprintln!(
+                    "live-transcription chunk_result received sequence={sequence} elapsed_ms={elapsed_ms}"
+                );
+            }
+            Ok(response)
+        }
+        Ok(Err(error)) => {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "live-transcription chunk submission failed stage=chunk_result_error sequence={sequence}"
+            );
+            Err(ChunkResponseWaitFailure::Response(error))
+        }
+        Err(_) => {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "live-transcription chunk submission failed stage=chunk_result_channel_closed sequence={sequence}"
+            );
+            Err(ChunkResponseWaitFailure::Response(
+                LiveTranscriptionClientError::ConnectionFailed,
+            ))
+        }
+    }
+}
+
+fn chunk_response_hard_timeout(
+    sequence: u64,
+    wait_started_at: Instant,
+) -> Result<super::protocol::ChunkResponse, ChunkResponseWaitFailure> {
+    #[cfg(debug_assertions)]
+    {
+        let elapsed_ms = wait_started_at.elapsed().as_millis();
+        eprintln!(
+            "live-transcription chunk_result timeout sequence={sequence} elapsed_ms={elapsed_ms}"
+        );
+        eprintln!(
+            "live-transcription chunk submission failed stage=chunk_result_timeout sequence={sequence}"
+        );
+    }
+    Err(ChunkResponseWaitFailure::HardTimeout)
 }
 
 async fn wait_for_start_response<T>(
@@ -1624,6 +1990,24 @@ async fn emit_assist_event(
     }
 }
 
+#[cfg(debug_assertions)]
+const fn assist_capability_name(capability: AssistSegmentCapability) -> &'static str {
+    match capability {
+        AssistSegmentCapability::Translation => "translation",
+        AssistSegmentCapability::Simplification => "simplification",
+    }
+}
+
+#[cfg(debug_assertions)]
+const fn assist_update_state_name(state: AssistUpdateState) -> &'static str {
+    match state {
+        AssistUpdateState::Processing => "processing",
+        AssistUpdateState::Ready => "ready",
+        AssistUpdateState::Failed => "failed",
+        AssistUpdateState::Unavailable => "unavailable",
+    }
+}
+
 async fn emit_transcript_events(
     event_sink: &Arc<Mutex<Option<Arc<dyn AssistEventSink>>>>,
     response: &super::protocol::ChunkResponse,
@@ -1641,6 +2025,13 @@ async fn emit_transcript_events(
             speaker: segment.speaker.clone(),
         })
         .map_err(|_| ())?;
+    }
+    #[cfg(debug_assertions)]
+    if !response.accepted_segments.is_empty() {
+        eprintln!(
+            "live-transcription transcript event emitted count={}",
+            response.accepted_segments.len()
+        );
     }
     Ok(())
 }
@@ -1676,15 +2067,36 @@ fn validate_chunk_admission(
 fn mark_failed_state(state: &mut ClientState) {
     state.writer = None;
     state.session = None;
+    state.timed_out_chunk = None;
     state.max_binary_payload_bytes = 0;
     state.status = LiveTranscriptionLifecycleStatus::Failed;
     state.message = Some("The live transcription connection failed.".to_owned());
     state.connection_stage = None;
 }
 
+/// Hard timeout is terminal for this client session: no later caller can
+/// reuse the stalled sequence. Retaining only its sequence and monotonic
+/// timeout instant lets the reader classify an already in-flight late result
+/// without retaining audio or server content.
+fn mark_chunk_result_timeout_failed_state(state: &mut ClientState, sequence: u64) {
+    let pending_sequence_matches = state
+        .pending_chunk
+        .as_ref()
+        .is_some_and(|pending| pending.sequence == sequence);
+    fail_pending_operations(state);
+    mark_failed_state(state);
+    if pending_sequence_matches {
+        state.timed_out_chunk = Some(TimedOutChunk {
+            sequence,
+            timed_out_at: Instant::now(),
+        });
+    }
+}
+
 fn mark_connect_failed_state(state: &mut ClientState, stage: LiveTranscriptionConnectStage) {
     state.writer = None;
     state.session = None;
+    state.timed_out_chunk = None;
     state.max_binary_payload_bytes = 0;
     state.status = LiveTranscriptionLifecycleStatus::Failed;
     state.message = Some(format!(
@@ -1697,6 +2109,7 @@ fn mark_connect_failed_state(state: &mut ClientState, stage: LiveTranscriptionCo
 fn clear_disconnected(state: &mut ClientState) {
     state.writer = None;
     state.session = None;
+    state.timed_out_chunk = None;
     state.max_binary_payload_bytes = 0;
     state.status = LiveTranscriptionLifecycleStatus::Disconnected;
     state.message = None;
@@ -1743,10 +2156,12 @@ fn public_status(state: &ClientState) -> LiveTranscriptionStatus {
 #[cfg(test)]
 mod tests {
     use super::{
-        clear_disconnected, dispatch_message, fail_pending_operations, mark_connect_failed_state,
-        mark_failed_state, session_start_failure_message, validate_chunk_admission,
-        wait_for_start_response, wait_for_start_response_with_timeout, ActiveSession, ClientState,
-        LiveTranscriptionClientError, LiveTranscriptionConnectStage,
+        clear_disconnected, dispatch_message, fail_pending_operations,
+        inbound_websocket_frame_kind, mark_chunk_result_timeout_failed_state,
+        mark_connect_failed_state, mark_failed_state, run_reader, session_start_failure_message,
+        validate_chunk_admission, wait_for_chunk_response_with_timeouts, wait_for_start_response,
+        wait_for_start_response_with_timeout, ActiveSession, ChunkResponseWaitFailure, ClientState,
+        InboundWebSocketFrameKind, LiveTranscriptionClientError, LiveTranscriptionConnectStage,
         LiveTranscriptionLifecycleStatus, LiveTranscriptionSessionStartStage,
         LiveTranscriptionSessionStartTransportFailure, LiveTranscriptionStatus,
         MeetingReviewArtifact, MeetingTranslationArtifact, PendingChunk, PendingEnd, PendingStart,
@@ -1765,11 +2180,17 @@ mod tests {
             },
         },
     };
+    use futures_util::{SinkExt, StreamExt};
     use std::{
         sync::{Arc, Mutex as StdMutex},
         time::Duration,
     };
-    use tokio::sync::{oneshot, Mutex};
+    use tokio::{
+        net::TcpListener,
+        sync::{mpsc, oneshot, Mutex},
+        time::{sleep, timeout},
+    };
+    use tokio_tungstenite::{accept_async, connect_async, tungstenite::protocol::Message};
     use uuid::Uuid;
 
     #[derive(Default)]
@@ -1838,6 +2259,81 @@ mod tests {
         clear_disconnected(&mut state);
         assert_eq!(state.status, LiveTranscriptionLifecycleStatus::Disconnected);
         assert!(state.message.is_none());
+    }
+
+    #[test]
+    fn reader_accepts_websocket_control_frames_and_rejects_binary_frames() {
+        assert_eq!(
+            inbound_websocket_frame_kind(&Message::Ping(Vec::new().into())),
+            InboundWebSocketFrameKind::Ping
+        );
+        assert_eq!(
+            inbound_websocket_frame_kind(&Message::Pong(Vec::new().into())),
+            InboundWebSocketFrameKind::Pong
+        );
+        assert_eq!(
+            inbound_websocket_frame_kind(&Message::Binary(Vec::new().into())),
+            InboundWebSocketFrameKind::UnexpectedBinary
+        );
+        assert_eq!(
+            inbound_websocket_frame_kind(&Message::Close(None)),
+            InboundWebSocketFrameKind::Close
+        );
+    }
+
+    #[tokio::test]
+    async fn reader_flushes_a_ping_response_and_forwards_the_next_text_message() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener binds");
+        let address = listener.local_addr().expect("listener address");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("client connects");
+            let mut socket = accept_async(stream).await.expect("server websocket opens");
+            socket
+                .send(Message::Ping(Vec::new().into()))
+                .await
+                .expect("server sends ping");
+
+            let pong = timeout(Duration::from_secs(1), socket.next())
+                .await
+                .expect("reader flushes pong")
+                .expect("client keeps socket open")
+                .expect("pong frame is valid");
+            assert!(matches!(pong, Message::Pong(_)));
+
+            socket
+                .send(Message::Text(
+                    r#"{"type":"status","version":1,"kind":"processing","message":null,"chunk_sequence":null}"#
+                        .into(),
+                ))
+                .await
+                .expect("server sends text message");
+            socket.close(None).await.expect("server closes socket");
+        });
+
+        let (socket, _) = connect_async(format!("ws://{address}"))
+            .await
+            .expect("client websocket opens");
+        let (writer, reader) = socket.split();
+        let (inbound_sender, mut inbound_receiver) = mpsc::channel(2);
+        let reader_task = tokio::spawn(run_reader(
+            reader,
+            Arc::new(Mutex::new(writer)),
+            inbound_sender,
+        ));
+
+        assert!(matches!(
+            timeout(Duration::from_secs(1), inbound_receiver.recv())
+                .await
+                .expect("reader forwards text")
+                .expect("inbound channel remains open"),
+            Ok(ServerMessage::Status)
+        ));
+
+        drop(inbound_receiver);
+        server.await.expect("server task completes");
+        reader_task.await.expect("reader task completes");
     }
 
     #[test]
@@ -1926,6 +2422,7 @@ mod tests {
             sample_rate_hz: 16_000,
             channels: 1,
             overlap_seconds: 0.5,
+            upstream_pending_chunks: 0,
             byte_length: 1,
         };
 
@@ -2022,6 +2519,10 @@ mod tests {
                 "session_connection_failed",
             ),
             (
+                LiveTranscriptionClientError::ChunkResultTimeout,
+                "session_connection_failed",
+            ),
+            (
                 LiveTranscriptionClientError::ProtocolFailed,
                 "session_protocol_failed",
             ),
@@ -2087,6 +2588,117 @@ mod tests {
                 LiveTranscriptionSessionStartTransportFailure::Timeout,
             ))
         );
+    }
+
+    #[tokio::test]
+    async fn chunk_response_wait_accepts_a_five_point_five_second_equivalent_result() {
+        let (sender, receiver) = oneshot::channel();
+        let send_task = tokio::spawn(async move {
+            // 55 ms within a 100 ms controlled budget models a 5.5 s result
+            // under the production 10 s latency budget without slowing tests.
+            sleep(Duration::from_millis(55)).await;
+            assert!(
+                sender
+                    .send(Ok(ChunkResponse {
+                        skipped_silence: true,
+                        accepted_segments: Vec::new(),
+                    }))
+                    .is_ok(),
+                "receiver remains connected"
+            );
+        });
+
+        let wait_result = wait_for_chunk_response_with_timeouts(
+            receiver,
+            11,
+            Duration::from_millis(100),
+            Duration::from_millis(200),
+        )
+        .await;
+        let Ok(result) = wait_result else {
+            panic!("slow valid chunk result remains within the response budget");
+        };
+        assert!(result.skipped_silence);
+        send_task.await.expect("sender task completes");
+    }
+
+    #[tokio::test]
+    async fn chunk_response_wait_recovers_a_result_after_the_soft_budget() {
+        let (sender, receiver) = oneshot::channel();
+        let send_task = tokio::spawn(async move {
+            sleep(Duration::from_millis(110)).await;
+            assert!(
+                sender
+                    .send(Ok(ChunkResponse {
+                        skipped_silence: false,
+                        accepted_segments: Vec::new(),
+                    }))
+                    .is_ok(),
+                "the original receiver remains connected through the recovery grace"
+            );
+        });
+
+        let wait_result = wait_for_chunk_response_with_timeouts(
+            receiver,
+            11,
+            Duration::from_millis(100),
+            Duration::from_millis(200),
+        )
+        .await;
+        assert!(
+            wait_result.is_ok(),
+            "slow valid result recovers before hard timeout"
+        );
+        send_task.await.expect("sender task completes");
+    }
+
+    #[tokio::test]
+    async fn chunk_response_wait_preserves_the_hard_timeout_outcome() {
+        let (_sender, receiver) =
+            oneshot::channel::<Result<ChunkResponse, LiveTranscriptionClientError>>();
+
+        assert!(matches!(
+            wait_for_chunk_response_with_timeouts(
+                receiver,
+                11,
+                Duration::from_millis(1),
+                Duration::from_millis(2),
+            )
+            .await,
+            Err(ChunkResponseWaitFailure::HardTimeout)
+        ));
+    }
+
+    #[test]
+    fn hard_chunk_timeout_fails_the_client_and_blocks_stale_sequence_reuse() {
+        let (sender, receiver) = oneshot::channel();
+        let mut state = ClientState {
+            status: LiveTranscriptionLifecycleStatus::SessionActive,
+            pending_chunk: Some(PendingChunk {
+                sequence: 11,
+                responder: sender,
+            }),
+            ..ClientState::default()
+        };
+
+        mark_chunk_result_timeout_failed_state(&mut state, 11);
+
+        assert_eq!(state.status, LiveTranscriptionLifecycleStatus::Failed);
+        assert!(state.session.is_none());
+        assert!(state.pending_chunk.is_none());
+        assert_eq!(
+            state
+                .timed_out_chunk
+                .as_ref()
+                .map(|timed_out| timed_out.sequence),
+            Some(11)
+        );
+        assert!(matches!(
+            receiver
+                .blocking_recv()
+                .expect("hard timeout resolves the pending response"),
+            Err(LiveTranscriptionClientError::ConnectionFailed)
+        ));
     }
 
     #[tokio::test]
@@ -2292,6 +2904,41 @@ mod tests {
         );
         assert!(receiver.try_recv().is_err());
         assert!(state.lock().await.pending_chunk.is_some());
+    }
+
+    #[tokio::test]
+    async fn late_chunk_result_after_a_hard_timeout_is_ignored_without_reusing_the_sequence() {
+        let (sender, _receiver) = oneshot::channel();
+        let mut timed_out_state = ClientState {
+            status: LiveTranscriptionLifecycleStatus::SessionActive,
+            pending_chunk: Some(PendingChunk {
+                sequence: 11,
+                responder: sender,
+            }),
+            ..ClientState::default()
+        };
+        mark_chunk_result_timeout_failed_state(&mut timed_out_state, 11);
+        let state = Arc::new(Mutex::new(timed_out_state));
+        let event_sink = Arc::new(Mutex::new(None));
+
+        assert!(
+            !dispatch_message(
+                &state,
+                &event_sink,
+                Ok(ServerMessage::ChunkResult {
+                    chunk_sequence: 11,
+                    response: ChunkResponse {
+                        skipped_silence: true,
+                        accepted_segments: Vec::new(),
+                    },
+                }),
+            )
+            .await
+        );
+        let state = state.lock().await;
+        assert_eq!(state.status, LiveTranscriptionLifecycleStatus::Failed);
+        assert!(state.session.is_none());
+        assert!(state.timed_out_chunk.is_none());
     }
 
     #[test]

@@ -21,6 +21,7 @@ pub(crate) struct AudioChunkFrameMetadata {
     pub(crate) sample_rate_hz: u32,
     pub(crate) channels: u8,
     pub(crate) overlap_seconds: f64,
+    pub(crate) upstream_pending_chunks: u8,
     pub(crate) byte_length: usize,
 }
 
@@ -50,6 +51,7 @@ pub(crate) fn build_audio_chunk_frame(
         "sequence": metadata.sequence,
         "session_id": metadata.session_id.to_string(),
         "source": metadata.source.as_str(),
+        "upstream_pending_chunks": metadata.upstream_pending_chunks,
     }))
     .map_err(|_| BinaryFrameError::Invalid)?;
     let metadata_length =
@@ -104,6 +106,7 @@ mod tests {
             sample_rate_hz: 16_000,
             channels: 1,
             overlap_seconds: 0.5,
+            upstream_pending_chunks: 0,
             byte_length,
         }
     }
@@ -120,6 +123,9 @@ mod tests {
         let metadata_length = u16::from_be_bytes([frame[6], frame[7]]) as usize;
         assert_eq!(&frame[8 + metadata_length..], payload);
         assert!(!frame[8..8 + metadata_length].contains(&b' '));
+        let parsed_metadata: serde_json::Value =
+            serde_json::from_slice(&frame[8..8 + metadata_length]).expect("metadata is JSON");
+        assert_eq!(parsed_metadata["upstream_pending_chunks"], 0);
     }
 
     #[test]

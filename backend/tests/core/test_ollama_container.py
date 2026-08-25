@@ -129,7 +129,7 @@ def _settings(**overrides: object) -> Settings:
 
     values: dict[str, object] = {"database_url": "sqlite+pysqlite:///:memory:"}
     values.update(overrides)
-    return Settings(**values)  # type: ignore[arg-type]
+    return Settings(_env_file=None, **values)  # type: ignore[arg-type]
 
 
 def test_unconfigured_ollama_capabilities_create_no_shared_client(

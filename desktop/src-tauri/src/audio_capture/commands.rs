@@ -116,26 +116,57 @@ pub(crate) async fn request_capture_authorization(
 pub(crate) async fn list_capture_displays(
     capture: State<'_, ManagedAudioCaptureCoordinator>,
 ) -> Result<Vec<CaptureDisplaySource>, String> {
-    capture
+    let result = capture
         .coordinator
         .lock()
         .await
         .bridge_mut()
-        .list_displays()
-        .map_err(|_| GENERIC_UNAVAILABLE.to_owned())
+        .list_displays();
+    match result {
+        Ok(displays) => {
+            #[cfg(debug_assertions)]
+            eprintln!("audio-capture display source count={}", displays.len());
+            Ok(displays)
+        }
+        Err(error) => {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "audio-capture display source enumeration={}",
+                error.enumeration_diagnostic()
+            );
+            Err(GENERIC_UNAVAILABLE.to_owned())
+        }
+    }
 }
 
 #[tauri::command]
 pub(crate) async fn list_capture_microphones(
     capture: State<'_, ManagedAudioCaptureCoordinator>,
 ) -> Result<Vec<CaptureMicrophoneSource>, String> {
-    capture
+    let result = capture
         .coordinator
         .lock()
         .await
         .bridge_mut()
-        .list_microphones()
-        .map_err(|_| GENERIC_UNAVAILABLE.to_owned())
+        .list_microphones();
+    match result {
+        Ok(microphones) => {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "audio-capture microphone source count={}",
+                microphones.len()
+            );
+            Ok(microphones)
+        }
+        Err(error) => {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "audio-capture microphone source enumeration={}",
+                error.enumeration_diagnostic()
+            );
+            Err(GENERIC_UNAVAILABLE.to_owned())
+        }
+    }
 }
 
 #[tauri::command]

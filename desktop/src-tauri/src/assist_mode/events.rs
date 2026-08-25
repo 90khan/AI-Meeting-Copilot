@@ -104,9 +104,17 @@ impl AssistEventSink for TauriAssistEventSink {
         &self,
         event: AssistSegmentUpdateEvent,
     ) -> Result<(), AssistEventDeliveryError> {
+        #[cfg(debug_assertions)]
+        let capability = match event.capability {
+            AssistSegmentCapability::Translation => "translation",
+            AssistSegmentCapability::Simplification => "simplification",
+        };
         self.app_handle
             .emit(SEGMENT_UPDATE_EVENT, event)
-            .map_err(|_| AssistEventDeliveryError)
+            .map_err(|_| AssistEventDeliveryError)?;
+        #[cfg(debug_assertions)]
+        eprintln!("assist event emitted capability={capability}");
+        Ok(())
     }
 
     fn emit_reply_suggestions(

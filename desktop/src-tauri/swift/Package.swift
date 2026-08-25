@@ -16,6 +16,10 @@ let package = Package(
             name: "CaptureSourcesObjC",
             path: "Sources/CaptureSourcesObjC",
             publicHeadersPath: "include",
+            cSettings: [
+                .define("AMCP_DEBUG_ENUMERATION_DIAGNOSTICS", .when(configuration: .debug)),
+                .define("AMCP_DEBUG_CAPTURE_DIAGNOSTICS", .when(configuration: .debug))
+            ],
             linkerSettings: [
                 .linkedFramework("AVFoundation"),
                 .linkedFramework("ScreenCaptureKit")

@@ -4,6 +4,7 @@ import asyncio
 from datetime import UTC, datetime
 from uuid import uuid4
 
+import app.application.use_cases.process_live_audio_chunk as process_chunk_module
 import pytest
 from app.application.dto import (
     AddTranscriptCommand,
@@ -28,6 +29,7 @@ from app.application.services import TranscriptDeduplicator
 from app.application.use_cases import (
     ProcessLiveAudioChunkUseCase,
 )
+from app.core.throughput_diagnostics import current_throughput_chunk_sequence
 from app.domain.exceptions import ValidationError
 from app.domain.value_objects import MeetingId
 
@@ -40,11 +42,13 @@ class FakeSpeechToTextProvider:
 
         self._result = result
         self.requests: list[SpeechToTextRequest] = []
+        self.diagnostic_sequences: list[int | None] = []
 
     async def transcribe(self, request: SpeechToTextRequest) -> TranscriptionResult:
         """Record the request and return the configured result."""
 
         self.requests.append(request)
+        self.diagnostic_sequences.append(current_throughput_chunk_sequence())
         if isinstance(self._result, Exception):
             raise self._result
         return self._result
@@ -293,3 +297,54 @@ def test_command_rejects_blank_previous_accepted_text() -> None:
             chunk=_chunk(),
             previous_accepted_text=" ",
         )
+
+
+def test_execute_emits_sequence_bound_content_free_throughput_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """STT and post-processing metrics correlate only through the chunk sequence."""
+
+    events: list[tuple[str, dict[str, int | str]]] = []
+
+    def capture(stage: str, /, **fields: int | str) -> None:
+        events.append((stage, fields))
+
+    monkeypatch.setattr(process_chunk_module, "emit_throughput", capture)
+    add_transcript_use_case = FakeAddTranscriptUseCase()
+    use_case, _ = _use_case(_result(), add_transcript_use_case)
+
+    asyncio.run(
+        use_case.execute(ProcessLiveAudioChunkCommand(chunk=_chunk(sequence=9)))
+    )
+
+    assert [stage for stage, _ in events] == [
+        "stt_started",
+        "stt_completed",
+        "postprocess_completed",
+    ]
+    assert events[0][0] == "stt_started"
+    for _, fields in events:
+        assert fields["sequence"] == 9
+        if "audio_duration_ms" in fields:
+            assert isinstance(fields["audio_duration_ms"], int)
+            assert fields["audio_duration_ms"] >= 0
+            assert isinstance(fields["processed_audio_ms"], int)
+            assert fields["processed_audio_ms"] >= 0
+    for _, fields in events[1:]:
+        assert isinstance(fields["elapsed_ms"], int)
+        assert fields["elapsed_ms"] >= 0
+        assert "data" not in fields
+        assert "text" not in fields
+
+
+def test_execute_propagates_only_the_chunk_sequence_to_provider_diagnostics() -> None:
+    """Provider telemetry receives a structural sequence without changing its DTO."""
+
+    add_transcript_use_case = FakeAddTranscriptUseCase()
+    use_case, provider = _use_case(_result(), add_transcript_use_case)
+
+    asyncio.run(
+        use_case.execute(ProcessLiveAudioChunkCommand(chunk=_chunk(sequence=30)))
+    )
+
+    assert provider.diagnostic_sequences == [30]

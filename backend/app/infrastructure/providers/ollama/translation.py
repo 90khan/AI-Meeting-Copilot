@@ -6,6 +6,7 @@ from app.application.dto.ai import (
     TranslationResult,
 )
 from app.application.exceptions import InvalidProviderResponseError
+from app.core.throughput_diagnostics import emit_throughput
 from app.infrastructure.providers.ollama.client import OllamaClient
 
 _TRANSLATION_SCHEMA: dict[str, object] = {
@@ -39,6 +40,7 @@ class OllamaTranslationProvider:
             user_prompt=user_prompt,
             schema=_TRANSLATION_SCHEMA,
         )
+        emit_throughput("assist_translation_response_received")
 
         try:
             translated_text = payload["translated_text"]
@@ -56,11 +58,19 @@ class OllamaTranslationProvider:
                 target_language=LanguageCode(value=target_language),
             )
         except (KeyError, TypeError, ValueError) as error:
+            emit_throughput(
+                "assist_translation_response_validation_failed",
+                reason="response_validation_failed",
+            )
             raise InvalidProviderResponseError(
                 "Ollama returned an invalid translation payload."
             ) from error
 
         if result.target_language != request.target_language:
+            emit_throughput(
+                "assist_translation_response_validation_failed",
+                reason="response_validation_failed",
+            )
             raise InvalidProviderResponseError(
                 "Ollama returned an unexpected target language."
             )
@@ -68,6 +78,10 @@ class OllamaTranslationProvider:
             request.source_language is not None
             and result.source_language != request.source_language
         ):
+            emit_throughput(
+                "assist_translation_response_validation_failed",
+                reason="response_validation_failed",
+            )
             raise InvalidProviderResponseError(
                 "Ollama returned an unexpected source language."
             )

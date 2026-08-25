@@ -16,6 +16,9 @@ from app.application.dto.assist_mode import (
 )
 from app.application.exceptions import ApplicationValidationError
 from app.application.services import AssistUpdateSink
+from app.core.logging import get_logger
+
+_LOGGER = get_logger(__name__)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -171,6 +174,11 @@ class WebSocketAssistUpdateSink(AssistUpdateSink):
         message = self._to_message(update)
         async with self._send_lock:
             await self._websocket.send_text(serialize_assist_message(message))
+        _LOGGER.debug(
+            "assist update sent capability=%s state=%s",
+            update.capability.value,
+            update.state.value,
+        )
 
     def _to_message(self, update: AssistUpdate) -> AssistMessage:
         """Convert an application update without introducing transport details."""

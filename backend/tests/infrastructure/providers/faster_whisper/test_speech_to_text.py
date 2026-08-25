@@ -15,6 +15,7 @@ from app.application.exceptions import (
     InvalidProviderResponseError,
     ProviderUnavailableError,
 )
+from app.core.throughput_diagnostics import throughput_chunk_sequence
 from app.infrastructure.providers.faster_whisper import (
     FasterWhisperModelManager,
     FasterWhisperSpeechToTextProvider,
@@ -65,6 +66,7 @@ class FakeModelManager:
         """Store the configured model or failure."""
 
         self._model = model
+        self._loaded = False
 
     def get_model(self) -> object:
         """Return the model or raise the configured failure."""
@@ -72,6 +74,14 @@ class FakeModelManager:
         if isinstance(self._model, BaseException):
             raise self._model
         return self._model
+
+    def get_model_with_load_state(self) -> tuple[object, bool]:
+        """Match the production model lifecycle seam for timing tests."""
+
+        model = self.get_model()
+        loaded_on_this_call = not self._loaded
+        self._loaded = True
+        return model, loaded_on_this_call
 
 
 def make_request(language_hint: LanguageCode | None = None) -> SpeechToTextRequest:
@@ -113,16 +123,26 @@ def test_wav_bytes_and_transcription_options_are_forwarded() -> None:
     ]
 
 
-def test_language_hint_is_reduced_to_its_primary_subtag() -> None:
-    """Regional language hints are reduced for Faster-Whisper."""
+@pytest.mark.parametrize(
+    ("language_hint", "expected_language"),
+    [
+        ("de", "de"),
+        ("de-DE", "de"),
+    ],
+)
+def test_language_hint_is_forwarded_as_its_primary_subtag(
+    language_hint: str,
+    expected_language: str,
+) -> None:
+    """Faster-Whisper receives the exact configured primary language code."""
 
     model = FakeModel([], FakeInfo(language="de", duration=0.0))
 
     asyncio.run(
-        make_provider(model).transcribe(make_request(LanguageCode(value="de-DE")))
+        make_provider(model).transcribe(make_request(LanguageCode(value=language_hint)))
     )
 
-    assert model.calls[0][1]["language"] == "de"
+    assert model.calls[0][1]["language"] == expected_language
 
 
 def test_absent_language_hint_allows_automatic_detection() -> None:
@@ -264,3 +284,127 @@ def test_inference_is_dispatched_through_asyncio_to_thread(
     asyncio.run(make_provider(model).transcribe(make_request()))
 
     assert len(calls) == 1
+
+
+def test_throughput_metrics_report_executor_wait_and_active_request_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """STT instrumentation contains bounded counters and no WAV payload data."""
+
+    events: list[tuple[str, dict[str, int | str]]] = []
+
+    def capture(stage: str, /, **fields: int | str) -> None:
+        events.append((stage, fields))
+
+    monkeypatch.setattr(speech_to_text_module, "emit_throughput", capture)
+    model = FakeModel([], FakeInfo(language="en", duration=0.0))
+
+    asyncio.run(make_provider(model).transcribe(make_request()))
+
+    assert [stage for stage, _ in events] == [
+        "stt_provider_started",
+        "stt_worker_started",
+        "stt_model_ready",
+        "stt_audio_decode_conversion_completed",
+        "stt_inference_completed",
+        "stt_transcription_completed",
+        "stt_worker_completed",
+    ]
+    assert events[0][1] == {
+        "ordinal": 1,
+        "active_requests": 1,
+        "ollama_active_requests": 0,
+        "first_request": "yes",
+    }
+    assert isinstance(events[1][1]["queue_wait_ms"], int)
+    assert events[2][1]["model_loaded"] == "yes"
+    assert isinstance(events[2][1]["model_load_ms"], int)
+    assert isinstance(events[3][1]["audio_decode_conversion_ms"], int)
+    assert isinstance(events[4][1]["stt_inference_ms"], int)
+    assert isinstance(events[5][1]["stt_duration_ms"], int)
+    assert isinstance(events[5][1]["stt_rtf_milli"], int)
+    assert events[6][1]["outcome"] == "completed"
+    assert events[6][1]["active_requests"] == 0
+    for _, fields in events:
+        assert "audio" not in fields
+        assert "data" not in fields
+
+
+def test_throughput_distinguishes_first_request_from_warm_requests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cold-start marker is deterministic without measuring content."""
+
+    events: list[tuple[str, dict[str, int | str]]] = []
+
+    def capture(stage: str, /, **fields: int | str) -> None:
+        events.append((stage, fields))
+
+    monkeypatch.setattr(speech_to_text_module, "emit_throughput", capture)
+    provider = make_provider(FakeModel([], FakeInfo(language="en", duration=0.0)))
+
+    asyncio.run(provider.transcribe(make_request()))
+    asyncio.run(provider.transcribe(make_request()))
+
+    started = [fields for stage, fields in events if stage == "stt_provider_started"]
+    model_ready = [fields for stage, fields in events if stage == "stt_model_ready"]
+    assert [fields["first_request"] for fields in started] == ["yes", "no"]
+    assert [fields["model_loaded"] for fields in model_ready] == ["yes", "no"]
+
+
+def test_throughput_propagates_the_chunk_sequence_into_the_worker_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Provider metrics correlate with the WebSocket chunk without changing DTOs."""
+
+    events: list[tuple[str, dict[str, int | str]]] = []
+
+    def capture(stage: str, /, **fields: int | str) -> None:
+        events.append((stage, fields))
+
+    monkeypatch.setattr(speech_to_text_module, "emit_throughput", capture)
+    with throughput_chunk_sequence(30):
+        provider = make_provider(FakeModel([], FakeInfo(language="en", duration=0.0)))
+        asyncio.run(provider.transcribe(make_request()))
+
+    assert all(fields["sequence"] == 30 for _, fields in events)
+
+
+def test_provider_emits_one_closed_runtime_configuration_at_construction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Runtime configuration is structural and does not include model paths."""
+
+    events: list[tuple[str, dict[str, int | str]]] = []
+
+    def capture(stage: str, /, **fields: int | str) -> None:
+        events.append((stage, fields))
+
+    monkeypatch.setattr(speech_to_text_module, "emit_throughput", capture)
+    FasterWhisperSpeechToTextProvider(
+        model_manager=cast(
+            FasterWhisperModelManager,
+            FakeModelManager(FakeModel([], FakeInfo(language="en", duration=0.0))),
+        ),
+        beam_size=5,
+        vad_enabled=False,
+        model_name="small",
+        device="cpu",
+        compute_type="int8",
+        cpu_threads=None,
+    )
+
+    assert events == [
+        (
+            "stt_configuration",
+            {
+                "model_name": "small",
+                "device": "cpu",
+                "compute_type": "int8",
+                "beam_size": 5,
+                "vad": "off",
+                "execution_mode": "asyncio_to_thread",
+                "cpu_threads_configured": "no",
+            },
+        )
+    ]

@@ -5,6 +5,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
+import app.application.services.assist_mode_orchestrator as assist_mode_module
 import pytest
 from app.application.dto.ai import GermanLevel, ReplySuggestion, ReplyTone
 from app.application.dto.assist_mode import (
@@ -20,6 +21,7 @@ from app.application.services import (
     AssistModeConfiguration,
     AssistModeLifecycleState,
     AssistModeOrchestrator,
+    LiveTranscriptionPriorityGate,
 )
 from app.domain.value_objects import MeetingId
 
@@ -71,18 +73,25 @@ class _FakeTranslationUseCase:
         error: Exception | None = None,
         gate: asyncio.Event | None = None,
         started: asyncio.Event | None = None,
+        cancelled: asyncio.Event | None = None,
     ) -> None:
         self.calls = calls
         self.error = error
         self.gate = gate
         self.started = started
+        self.cancelled = cancelled
 
     async def execute(self, segment: TranscriptSegment) -> AssistUpdate:
         self.calls.append("translation")
         if self.started is not None:
             self.started.set()
         if self.gate is not None:
-            await self.gate.wait()
+            try:
+                await self.gate.wait()
+            except asyncio.CancelledError:
+                if self.cancelled is not None:
+                    self.cancelled.set()
+                raise
         if self.error is not None:
             raise self.error
         return _ready_update(segment, AssistCapability.TRANSLATION)
@@ -134,6 +143,8 @@ def _orchestrator(
     translation_error: Exception | None = None,
     translation_gate: asyncio.Event | None = None,
     translation_started: asyncio.Event | None = None,
+    translation_cancelled: asyncio.Event | None = None,
+    priority_gate: LiveTranscriptionPriorityGate | None = None,
     sink: _FakeSink | None = None,
 ) -> tuple[AssistModeOrchestrator, _FakeReplyUseCase, _FakeSink, list[str]]:
     recorded_calls = calls if calls is not None else []
@@ -147,10 +158,12 @@ def _orchestrator(
                 error=translation_error,
                 gate=translation_gate,
                 started=translation_started,
+                cancelled=translation_cancelled,
             ),
             simplification_use_case=_FakeSimplificationUseCase(calls=recorded_calls),
             reply_suggestions_use_case=reply,
             update_sink=update_sink,
+            priority_gate=priority_gate,
         ),
         reply,
         update_sink,
@@ -272,7 +285,7 @@ def test_full_queue_drops_oldest_pending_segment_and_preserves_newest() -> None:
         gate = asyncio.Event()
         started = asyncio.Event()
         configuration = AssistModeConfiguration(
-            reply_coaching_enabled=False,
+            reply_coaching_enabled=True,
             max_queue_size=1,
         )
         orchestrator, _, sink, calls = _orchestrator(
@@ -295,7 +308,13 @@ def test_full_queue_drops_oldest_pending_segment_and_preserves_newest() -> None:
             )
         )
         gate.set()
-        await _wait_until(lambda: calls == ["translation", "translation"])
+        await _wait_until(
+            lambda: any(
+                update.transcript_id == newest.transcript_id
+                and update.state is AssistState.READY
+                for update in sink.updates
+            )
+        )
 
         assert not any(
             update.transcript_id == dropped.transcript_id
@@ -307,7 +326,233 @@ def test_full_queue_drops_oldest_pending_segment_and_preserves_newest() -> None:
             and update.state is AssistState.READY
             for update in sink.updates
         )
+        assert calls == ["translation", "reply", "translation", "reply"]
         await orchestrator.stop()
+
+    asyncio.run(run())
+
+
+def test_stt_priority_defers_and_preempts_best_effort_translation() -> None:
+    """An active or newly-started STT call never waits for Ollama work."""
+
+    async def run() -> None:
+        translation_gate = asyncio.Event()
+        translation_started = asyncio.Event()
+        translation_cancelled = asyncio.Event()
+        priority_gate = LiveTranscriptionPriorityGate()
+        orchestrator, _, sink, calls = _orchestrator(
+            configuration=AssistModeConfiguration(reply_coaching_enabled=False),
+            translation_gate=translation_gate,
+            translation_started=translation_started,
+            translation_cancelled=translation_cancelled,
+            priority_gate=priority_gate,
+        )
+        priority_gate.stt_started()
+        await orchestrator.start()
+
+        assert await orchestrator.enqueue(_segment(1)) is True
+        await asyncio.sleep(0)
+        assert calls == []
+        assert sink.updates == []
+
+        priority_gate.stt_finished()
+        await translation_started.wait()
+        priority_gate.stt_started()
+        await translation_cancelled.wait()
+        await _wait_until(
+            lambda: any(
+                update.state is AssistState.UNAVAILABLE for update in sink.updates
+            )
+        )
+
+        assert calls == ["translation"]
+        await orchestrator.stop()
+
+    asyncio.run(run())
+
+
+def test_upstream_backlog_defers_the_latest_translation_until_it_clears() -> None:
+    """A source-side STT backlog cannot be mistaken for scheduler idle capacity."""
+
+    async def run() -> None:
+        translation_started = asyncio.Event()
+        priority_gate = LiveTranscriptionPriorityGate()
+        orchestrator, _, _, calls = _orchestrator(
+            configuration=AssistModeConfiguration(reply_coaching_enabled=False),
+            translation_started=translation_started,
+            priority_gate=priority_gate,
+        )
+        priority_gate.set_upstream_pending_stt_chunks(2)
+        await orchestrator.start()
+        await orchestrator.enqueue(_segment(1))
+        await asyncio.sleep(0)
+
+        assert calls == []
+        assert priority_gate.upstream_pending_stt_chunks == 2
+
+        priority_gate.set_upstream_pending_stt_chunks(0)
+        await translation_started.wait()
+        assert calls == ["translation"]
+        await orchestrator.stop()
+
+    asyncio.run(run())
+
+
+def test_slow_translation_coalesces_to_one_latest_pending_segment() -> None:
+    """A slow provider has one active translation and one logical pending item."""
+
+    async def run() -> None:
+        translation_gate = asyncio.Event()
+        translation_started = asyncio.Event()
+        priority_gate = LiveTranscriptionPriorityGate()
+        orchestrator, _, sink, calls = _orchestrator(
+            configuration=AssistModeConfiguration(reply_coaching_enabled=False),
+            translation_gate=translation_gate,
+            translation_started=translation_started,
+            priority_gate=priority_gate,
+        )
+        first, superseded, newest = _segment(1), _segment(2), _segment(3)
+        await orchestrator.start()
+        await orchestrator.enqueue(first)
+        await translation_started.wait()
+        await orchestrator.enqueue(superseded)
+        await orchestrator.enqueue(newest)
+
+        translation_gate.set()
+        await _wait_until(
+            lambda: any(
+                update.transcript_id == newest.transcript_id
+                and update.state is AssistState.READY
+                for update in sink.updates
+            )
+        )
+
+        assert calls == ["translation", "translation"]
+        assert not any(
+            update.transcript_id == superseded.transcript_id for update in sink.updates
+        )
+        assert not any(
+            update.transcript_id == superseded.transcript_id
+            and update.state is AssistState.READY
+            for update in sink.updates
+        )
+        await orchestrator.stop()
+
+    asyncio.run(run())
+
+
+def test_translation_only_outer_queue_keeps_only_the_latest_waiting_segment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Translation-only bursts never build a stale generic Assist backlog."""
+
+    events: list[tuple[str, dict[str, int | str]]] = []
+
+    def capture(stage: str, /, **fields: int | str) -> None:
+        events.append((stage, fields))
+
+    monkeypatch.setattr(assist_mode_module, "emit_throughput", capture)
+
+    async def run() -> None:
+        priority_gate = LiveTranscriptionPriorityGate()
+        orchestrator, _, sink, calls = _orchestrator(
+            configuration=AssistModeConfiguration(reply_coaching_enabled=False),
+            priority_gate=priority_gate,
+        )
+        segments = tuple(_segment(index) for index in range(10))
+        priority_gate.stt_started()
+        await orchestrator.start()
+        await orchestrator.enqueue(segments[0])
+        await asyncio.sleep(0)
+        for segment in segments[1:]:
+            await orchestrator.enqueue(segment)
+
+        assert orchestrator._queue.qsize() == 1
+        assert orchestrator._latest_translation_ordinal == len(segments)
+        assert calls == []
+
+        priority_gate.stt_finished()
+        await _wait_until(
+            lambda: any(
+                update.transcript_id == segments[-1].transcript_id
+                and update.state is AssistState.READY
+                for update in sink.updates
+            )
+        )
+
+        assert calls == ["translation"]
+        assert not any(
+            update.transcript_id != segments[-1].transcript_id
+            and update.state is AssistState.READY
+            for update in sink.updates
+        )
+        await orchestrator.stop()
+
+    asyncio.run(run())
+    coalesced_events = [
+        fields for stage, fields in events if stage == "assist_outer_queue_coalesced"
+    ]
+    assert len(coalesced_events) == len(range(10)) - 2
+    assert all(
+        fields
+        == {
+            "capability": "translation",
+            "replaced_count": 1,
+            "queue_depth": 1,
+        }
+        for fields in coalesced_events
+    )
+
+
+def test_translation_only_coalescing_does_not_change_reply_coaching_order() -> None:
+    """Mixed-capability sessions retain their existing segment FIFO semantics."""
+
+    async def run() -> None:
+        priority_gate = LiveTranscriptionPriorityGate()
+        orchestrator, reply, _, _ = _orchestrator(priority_gate=priority_gate)
+        first, second, third = (_segment(index) for index in range(3))
+        priority_gate.stt_started()
+        await orchestrator.start()
+        await orchestrator.enqueue(first)
+        await asyncio.sleep(0)
+        await orchestrator.enqueue(second)
+        await orchestrator.enqueue(third)
+
+        assert orchestrator._queue.qsize() == 2
+
+        priority_gate.stt_finished()
+        await _wait_until(lambda: len(reply.contexts) == 3)
+
+        assert [
+            context.newest_finalized_segment.transcript_id for context in reply.contexts
+        ] == [first.transcript_id, second.transcript_id, third.transcript_id]
+        await orchestrator.stop()
+
+    asyncio.run(run())
+
+
+def test_translation_only_coalesced_work_does_not_prevent_shutdown() -> None:
+    """The one-slot pending mailbox is cleared by the existing stop lifecycle."""
+
+    async def run() -> None:
+        priority_gate = LiveTranscriptionPriorityGate()
+        orchestrator, _, sink, calls = _orchestrator(
+            configuration=AssistModeConfiguration(reply_coaching_enabled=False),
+            priority_gate=priority_gate,
+        )
+        priority_gate.stt_started()
+        await orchestrator.start()
+        await orchestrator.enqueue(_segment(1))
+        await asyncio.sleep(0)
+        await orchestrator.enqueue(_segment(2))
+        await orchestrator.enqueue(_segment(3))
+
+        await orchestrator.stop()
+
+        assert orchestrator.state is AssistModeLifecycleState.STOPPED
+        assert orchestrator._queue.empty() is True
+        assert calls == []
+        assert sink.updates == []
 
     asyncio.run(run())
 
@@ -380,3 +625,66 @@ def test_stop_cancels_pending_work_clears_context_and_allows_no_late_updates() -
         assert len(sink.updates) == update_count
 
     asyncio.run(run())
+
+
+def test_assist_metrics_use_only_internal_ordinals_and_closed_labels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Queue and capability timing never include transcript IDs or text."""
+
+    events: list[tuple[str, dict[str, int | str]]] = []
+
+    def capture(stage: str, /, **fields: int | str) -> None:
+        events.append((stage, fields))
+
+    monkeypatch.setattr(assist_mode_module, "emit_throughput", capture)
+
+    async def run() -> None:
+        orchestrator, _, sink, _ = _orchestrator(
+            configuration=AssistModeConfiguration(reply_coaching_enabled=False)
+        )
+        await orchestrator.start()
+        await orchestrator.enqueue(_segment(1))
+        await _wait_until(lambda: len(sink.updates) == 2)
+        await orchestrator.stop()
+
+    asyncio.run(run())
+
+    assert events[0] == (
+        "assist_translation_scheduler",
+        {
+            "state": "pending",
+            "active_translation_count": 0,
+            "pending_translation_count": 1,
+            "upstream_pending_stt_chunks": 0,
+        },
+    )
+    assert events[1] == ("assist_enqueued", {"ordinal": 1, "queue_depth": 1})
+    started_fields = events[3]
+    assert started_fields[0] == "assist_translation_scheduler"
+    assert started_fields[1] == {
+        "state": "started",
+        "active_translation_count": 1,
+        "pending_translation_count": 0,
+        "upstream_pending_stt_chunks": 0,
+        "admission_reason": "probe",
+        "estimated_idle_window_ms": 0,
+        "extended_idle_margin_ms": 0,
+    }
+    assert events[4] == (
+        "assist_capability_started",
+        {"ordinal": 1, "capability": "translation"},
+    )
+    assert any(stage == "assist_translation_update_ready" for stage, _ in events)
+    assert any(
+        stage == "assist_translation_scheduler" and fields["state"] == "completed"
+        for stage, fields in events
+    )
+    segment_completed = next(
+        fields for stage, fields in events if stage == "assist_segment_completed"
+    )
+    assert isinstance(segment_completed["elapsed_ms"], int)
+    assert segment_completed["elapsed_ms"] >= 0
+    assert all(
+        "transcript_id" not in fields and "text" not in fields for _, fields in events
+    )

@@ -7,6 +7,7 @@ from typing import ClassVar
 import app.core.container as container_module
 import pytest
 from app.application.exceptions import ProviderUnavailableError
+from app.application.services import LiveTranscriptionPriorityGate
 from app.core.config import Settings
 from app.core.container import Container
 
@@ -61,12 +62,22 @@ class FakeSpeechToTextProvider:
         model_manager: FakeModelManager,
         beam_size: int,
         vad_enabled: bool,
+        model_name: str | None,
+        device: str | None,
+        compute_type: str | None,
+        cpu_threads: int | None,
+        priority_gate: LiveTranscriptionPriorityGate,
     ) -> None:
         """Record configured provider arguments."""
 
         self.model_manager = model_manager
         self.beam_size = beam_size
         self.vad_enabled = vad_enabled
+        self.model_name = model_name
+        self.device = device
+        self.compute_type = compute_type
+        self.cpu_threads = cpu_threads
+        self.priority_gate = priority_gate
         self.instances.append(self)
 
 
@@ -134,6 +145,7 @@ def test_faster_whisper_is_created_lazily_for_one_container_lifecycle(
     assert provider.model_manager is manager
     assert provider.beam_size == 7
     assert provider.vad_enabled is True
+    assert provider.priority_gate is container._live_transcription_priority_gate
     assert manager.get_model_calls == 0
     assert container.get_speech_to_text_provider() is provider
     assert container.get_speech_to_text_provider() is provider

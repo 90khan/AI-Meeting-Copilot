@@ -247,6 +247,186 @@ pub(crate) fn parse_server_message(input: &str) -> Result<ServerMessage, Protoco
     }
 }
 
+/// Classify a rejected inbound message without retaining or exposing its content.
+///
+/// This is debug-only because it exists solely to diagnose protocol-version
+/// compatibility during local development. The result is restricted to
+/// allowlisted structural labels; it never includes field values.
+#[cfg(debug_assertions)]
+pub(crate) fn classify_server_message_failure(input: &str) -> (&'static str, &'static str) {
+    let Ok(value) = serde_json::from_str::<Value>(input) else {
+        return ("unknown", "invalid_json");
+    };
+    let Some(object) = value.as_object() else {
+        return ("unknown", "top_level_not_object");
+    };
+    let Some(message_type) = object.get("type").and_then(Value::as_str) else {
+        return ("unknown", "missing_or_invalid_type");
+    };
+    match message_type {
+        "assist_segment_update" => (
+            "assist_segment_update",
+            classify_assist_segment_update_failure(object),
+        ),
+        "assist_reply_suggestions" => (
+            "assist_reply_suggestions",
+            classify_assist_reply_suggestions_failure(object),
+        ),
+        "error" => ("error", "schema_or_value_invalid"),
+        "status" => ("status", "schema_or_value_invalid"),
+        "chunk_result" => ("chunk_result", "schema_or_value_invalid"),
+        "hello_ack" => ("hello_ack", "schema_or_value_invalid"),
+        "session_started" => ("session_started", "schema_or_value_invalid"),
+        "session_stopped" => ("session_stopped", "schema_or_value_invalid"),
+        _ => ("unknown", "unknown_type"),
+    }
+}
+
+#[cfg(debug_assertions)]
+fn classify_assist_segment_update_failure(object: &serde_json::Map<String, Value>) -> &'static str {
+    const COMMON: [&str; 5] = ["type", "version", "transcript_id", "capability", "state"];
+    if has_missing_field(object, &COMMON) {
+        return "missing_field";
+    }
+    if !object.get("version").is_some_and(Value::is_u64) {
+        return "field_type_mismatch";
+    }
+    if object.get("version").and_then(Value::as_u64) != Some(u64::from(PROTOCOL_VERSION)) {
+        return "invalid_version";
+    }
+    if !object.get("transcript_id").is_some_and(Value::is_string) {
+        return "field_type_mismatch";
+    }
+    let Some(capability) = object.get("capability").and_then(Value::as_str) else {
+        return "field_type_mismatch";
+    };
+    if !matches!(capability, "translation" | "simplification") {
+        return "invalid_capability";
+    }
+    let Some(state) = object.get("state").and_then(Value::as_str) else {
+        return "field_type_mismatch";
+    };
+    if !matches!(state, "processing" | "ready" | "failed" | "unavailable") {
+        return "invalid_state";
+    }
+    let expected: &[&str] = match (capability, state) {
+        ("translation", "ready") => &[
+            "type",
+            "version",
+            "transcript_id",
+            "capability",
+            "state",
+            "translated_text",
+        ],
+        ("simplification", "ready") => &[
+            "type",
+            "version",
+            "transcript_id",
+            "capability",
+            "state",
+            "simplified_text",
+            "target_level",
+        ],
+        (_, _) if object.contains_key("message") => &[
+            "type",
+            "version",
+            "transcript_id",
+            "capability",
+            "state",
+            "message",
+        ],
+        _ => &COMMON,
+    };
+    if has_missing_field(object, expected) {
+        return "missing_field";
+    }
+    if has_unexpected_field(object, expected) {
+        return "unexpected_field";
+    }
+    match (capability, state) {
+        ("translation", "ready")
+            if !object.get("translated_text").is_some_and(|value| {
+                value.as_str().is_some_and(|text| !text.trim().is_empty())
+            }) =>
+        {
+            "field_type_mismatch"
+        }
+        ("simplification", "ready")
+            if !object.get("simplified_text").is_some_and(|value| {
+                value.as_str().is_some_and(|text| !text.trim().is_empty())
+            }) || !object
+                .get("target_level")
+                .is_some_and(|value| matches!(value.as_str(), Some("b1" | "b2"))) =>
+        {
+            "field_type_mismatch"
+        }
+        (_, state)
+            if state != "ready"
+                && object.contains_key("message")
+                && !object.get("message").is_some_and(|value| {
+                    value.as_str().is_some_and(|text| !text.trim().is_empty())
+                }) =>
+        {
+            "field_type_mismatch"
+        }
+        _ => "schema_or_value_invalid",
+    }
+}
+
+#[cfg(debug_assertions)]
+fn classify_assist_reply_suggestions_failure(
+    object: &serde_json::Map<String, Value>,
+) -> &'static str {
+    const COMMON: [&str; 4] = ["type", "version", "anchor_transcript_id", "state"];
+    if has_missing_field(object, &COMMON) {
+        return "missing_field";
+    }
+    let Some(state) = object.get("state").and_then(Value::as_str) else {
+        return "field_type_mismatch";
+    };
+    if !matches!(state, "processing" | "ready" | "failed" | "unavailable") {
+        return "invalid_state";
+    }
+    let expected: &[&str] = if state == "ready" {
+        &[
+            "type",
+            "version",
+            "anchor_transcript_id",
+            "state",
+            "suggestions",
+        ]
+    } else if object.contains_key("message") {
+        &[
+            "type",
+            "version",
+            "anchor_transcript_id",
+            "state",
+            "message",
+        ]
+    } else {
+        &COMMON
+    };
+    if has_missing_field(object, expected) {
+        "missing_field"
+    } else if has_unexpected_field(object, expected) {
+        "unexpected_field"
+    } else {
+        "schema_or_value_invalid"
+    }
+}
+
+#[cfg(debug_assertions)]
+fn has_missing_field(object: &serde_json::Map<String, Value>, expected: &[&str]) -> bool {
+    expected.iter().any(|field| !object.contains_key(*field))
+}
+
+#[cfg(debug_assertions)]
+fn has_unexpected_field(object: &serde_json::Map<String, Value>, expected: &[&str]) -> bool {
+    object
+        .keys()
+        .any(|field| !expected.contains(&field.as_str()))
+}
+
 fn parse_assist_segment_update(
     object: &serde_json::Map<String, Value>,
 ) -> Result<ServerMessage, ProtocolError> {
@@ -675,8 +855,9 @@ fn optional_uuid(
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_server_message, serialize_hello, serialize_start_session, AssistModeConfiguration,
-        AudioSource, ProtocolError, ServerMessage, SimplificationLevel,
+        classify_server_message_failure, parse_server_message, serialize_hello,
+        serialize_start_session, AssistModeConfiguration, AudioSource, ProtocolError,
+        ServerMessage, SimplificationLevel,
     };
     use uuid::Uuid;
 
@@ -917,6 +1098,62 @@ mod tests {
             parse_server_message(reply),
             Ok(ServerMessage::AssistReplySuggestions(_))
         ));
+    }
+
+    #[test]
+    fn parses_every_backend_assist_segment_update_state_and_unicode_text() {
+        let updates = [
+            r#"{"type":"assist_segment_update","version":1,"transcript_id":"00000000-0000-0000-0000-000000000010","capability":"translation","state":"processing"}"#,
+            r#"{"type":"assist_segment_update","version":1,"transcript_id":"00000000-0000-0000-0000-000000000010","capability":"translation","state":"ready","translated_text":"Türkçe\nçeviri"}"#,
+            r#"{"type":"assist_segment_update","version":1,"transcript_id":"00000000-0000-0000-0000-000000000010","capability":"translation","state":"failed"}"#,
+            r#"{"type":"assist_segment_update","version":1,"transcript_id":"00000000-0000-0000-0000-000000000010","capability":"translation","state":"unavailable","message":"Translation is temporarily unavailable."}"#,
+            r#"{"type":"assist_segment_update","version":1,"transcript_id":"00000000-0000-0000-0000-000000000010","capability":"simplification","state":"processing"}"#,
+            r#"{"type":"assist_segment_update","version":1,"transcript_id":"00000000-0000-0000-0000-000000000010","capability":"simplification","state":"ready","simplified_text":"Einfacher Text","target_level":"b1"}"#,
+        ];
+
+        for update in updates {
+            assert!(matches!(
+                parse_server_message(update),
+                Ok(ServerMessage::AssistSegmentUpdate(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn parses_every_backend_reply_suggestion_update_state() {
+        let updates = [
+            r#"{"type":"assist_reply_suggestions","version":1,"anchor_transcript_id":"00000000-0000-0000-0000-000000000010","state":"processing"}"#,
+            r#"{"type":"assist_reply_suggestions","version":1,"anchor_transcript_id":"00000000-0000-0000-0000-000000000010","state":"ready","suggestions":[{"text":"One","tone":"professional"}]}"#,
+            r#"{"type":"assist_reply_suggestions","version":1,"anchor_transcript_id":"00000000-0000-0000-0000-000000000010","state":"failed"}"#,
+            r#"{"type":"assist_reply_suggestions","version":1,"anchor_transcript_id":"00000000-0000-0000-0000-000000000010","state":"unavailable","message":"Reply coaching is temporarily unavailable."}"#,
+        ];
+
+        for update in updates {
+            assert!(matches!(
+                parse_server_message(update),
+                Ok(ServerMessage::AssistReplySuggestions(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn classifies_assist_schema_failures_without_retaining_content() {
+        let missing = r#"{"type":"assist_segment_update","version":1,"transcript_id":"00000000-0000-0000-0000-000000000010","capability":"translation","state":"ready"}"#;
+        let unexpected = r#"{"type":"assist_segment_update","version":1,"transcript_id":"00000000-0000-0000-0000-000000000010","capability":"translation","state":"ready","translated_text":"private","message":"private"}"#;
+        let invalid_state = r#"{"type":"assist_segment_update","version":1,"transcript_id":"00000000-0000-0000-0000-000000000010","capability":"translation","state":"unknown"}"#;
+
+        assert_eq!(
+            classify_server_message_failure(missing),
+            ("assist_segment_update", "missing_field")
+        );
+        assert_eq!(
+            classify_server_message_failure(unexpected),
+            ("assist_segment_update", "unexpected_field")
+        );
+        assert_eq!(
+            classify_server_message_failure(invalid_state),
+            ("assist_segment_update", "invalid_state")
+        );
     }
 
     #[test]

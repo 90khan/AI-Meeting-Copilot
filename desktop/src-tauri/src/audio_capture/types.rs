@@ -140,6 +140,21 @@ impl NativeAudioFrame {
     pub const fn samples(&self) -> &NativeAudioSamples {
         &self.samples
     }
+
+    /// Returns the duration represented by this validated native frame.
+    ///
+    /// This is intentionally derived only from structural audio metadata. It
+    /// exists for private throughput diagnostics and never inspects or exposes
+    /// sample content.
+    #[cfg(debug_assertions)]
+    pub(crate) fn duration_microseconds(&self) -> u64 {
+        let sample_frames = self.samples.len() / usize::from(self.format.channels());
+        let microseconds = (sample_frames as u128)
+            .saturating_mul(1_000_000)
+            .checked_div(u128::from(self.format.sample_rate_hz()))
+            .unwrap_or_default();
+        u64::try_from(microseconds).unwrap_or(u64::MAX)
+    }
 }
 
 impl std::fmt::Debug for NativeAudioSamples {
@@ -304,6 +319,19 @@ mod tests {
             ),
             Err(NativeAudioValidationError::InvalidSamples)
         ));
+    }
+
+    #[test]
+    fn derives_native_frame_duration_from_validated_structure_only() {
+        let frame = NativeAudioFrame::new(
+            NativeAudioSource::Microphone,
+            format(2),
+            0.0,
+            NativeAudioSamples::Float32(vec![0.0; 96_000]),
+        )
+        .expect("stereo frame is valid");
+
+        assert_eq!(frame.duration_microseconds(), 1_000_000);
     }
 
     #[test]

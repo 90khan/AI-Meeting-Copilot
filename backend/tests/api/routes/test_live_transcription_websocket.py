@@ -132,6 +132,7 @@ class FakeAssistOrchestrator:
         self.started = False
         self.stop_call_count = 0
         self.enqueued: list[object] = []
+        self.upstream_pending_stt_chunks: list[int] = []
 
     async def start(self) -> None:
         """Mark the fake as active."""
@@ -152,6 +153,11 @@ class FakeAssistOrchestrator:
             )
         )
         return True
+
+    def set_upstream_pending_stt_chunks(self, pending_chunks: int) -> None:
+        """Record the structural source-side backlog signal."""
+
+        self.upstream_pending_stt_chunks.append(pending_chunks)
 
     async def stop(self) -> None:
         """Track session shutdown."""
@@ -297,7 +303,13 @@ def _result(
     )
 
 
-def _frame(session_id: UUID, sequence: int, payload: bytes = b"wav") -> bytes:
+def _frame(
+    session_id: UUID,
+    sequence: int,
+    payload: bytes = b"wav",
+    *,
+    upstream_pending_chunks: int = 0,
+) -> bytes:
     return build_audio_chunk_frame(
         metadata=AudioChunkFrameMetadata(
             session_id=session_id,
@@ -308,6 +320,7 @@ def _frame(session_id: UUID, sequence: int, payload: bytes = b"wav") -> bytes:
             sample_rate_hz=16_000,
             channels=1,
             overlap_seconds=0.5,
+            upstream_pending_chunks=upstream_pending_chunks,
             byte_length=len(payload),
         ),
         wav_payload=payload,
@@ -348,6 +361,90 @@ def test_successful_hello_start_chunk_and_end_flow() -> None:
     assert container.sessions[0].source is AudioSource.MIXED
     assert len(container.sessions[0].chunks) == 1
     assert container.sessions[0].stop_call_count >= 1
+
+
+def test_chunk_throughput_metrics_measure_parse_send_and_total_without_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The transport reports only structural chunk-latency measurements."""
+
+    import app.api.routes.live_transcription as route_module
+
+    events: list[tuple[str, dict[str, int | str]]] = []
+
+    def capture(stage: str, /, **fields: int | str) -> None:
+        events.append((stage, fields))
+
+    monkeypatch.setattr(route_module, "emit_throughput", capture)
+    with _client(_app(FakeContainer())) as client:
+        with client.websocket_connect(_PATH) as websocket:
+            websocket.send_text(_hello())
+            websocket.receive_text()
+            websocket.send_text(_start())
+            session_id = UUID(json.loads(websocket.receive_text())["session_id"])
+            websocket.send_bytes(_frame(session_id, 0, upstream_pending_chunks=3))
+            assert json.loads(websocket.receive_text())["type"] == "chunk_result"
+
+    chunk_events = [event for event in events if event[0] != "session_started"]
+    assert [stage for stage, _ in chunk_events] == [
+        "chunk_received",
+        "backend_chunk",
+        "chunk_result_sent",
+        "backend_chunk_completed",
+    ]
+    received = chunk_events[0][1]
+    assert received["sequence"] == 0
+    assert isinstance(received["audio_duration_ms"], int)
+    assert isinstance(received["frame_parse_ms"], int)
+    assert isinstance(received["entry_monotonic_ms"], int)
+    assert chunk_events[1][1]["backend_queue_wait_ms"] == 0
+    assert isinstance(chunk_events[1][1]["total_backend_ms"], int)
+    assert isinstance(chunk_events[2][1]["elapsed_ms"], int)
+    assert isinstance(chunk_events[3][1]["backend_total_ms"], int)
+    for _, fields in chunk_events:
+        assert "text" not in fields
+        assert "data" not in fields
+        assert "meeting_id" not in fields
+
+
+def test_session_start_emits_only_safe_assist_mode_throughput_labels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The A/B marker carries configuration flags but no session identifiers."""
+
+    import app.api.routes.live_transcription as route_module
+
+    events: list[tuple[str, dict[str, int | str]]] = []
+
+    def capture(stage: str, /, **fields: int | str) -> None:
+        events.append((stage, fields))
+
+    monkeypatch.setattr(route_module, "emit_throughput", capture)
+    assist_mode = AssistModeSessionConfiguration(
+        enabled=True,
+        translation_enabled=True,
+        simplification_enabled=False,
+        simplification_level=None,
+        reply_coaching_enabled=False,
+    )
+    with _client(_app(FakeContainer())) as client:
+        with client.websocket_connect(_PATH) as websocket:
+            websocket.send_text(_hello())
+            websocket.receive_text()
+            websocket.send_text(_start(assist_mode=assist_mode))
+            assert json.loads(websocket.receive_text())["type"] == "session_started"
+
+    assert events == [
+        (
+            "session_started",
+            {
+                "assist": "on",
+                "translation": "on",
+                "simplification": "off",
+                "reply_coaching": "off",
+            },
+        )
+    ]
 
 
 def test_invalid_token_closes_with_4401() -> None:
@@ -609,7 +706,7 @@ def test_assist_updates_follow_the_primary_chunk_result_and_stop_with_session() 
             websocket.send_text(_start(assist_mode=assist_mode))
             session_id = UUID(json.loads(websocket.receive_text())["session_id"])
 
-            websocket.send_bytes(_frame(session_id, 0))
+            websocket.send_bytes(_frame(session_id, 0, upstream_pending_chunks=3))
             chunk_result = json.loads(websocket.receive_text())
             assist_update = json.loads(websocket.receive_text())
 
@@ -626,6 +723,7 @@ def test_assist_updates_follow_the_primary_chunk_result_and_stop_with_session() 
 
     assert container.assist_orchestrators[0].started is True
     assert container.assist_orchestrators[0].stop_call_count == 1
+    assert container.assist_orchestrators[0].upstream_pending_stt_chunks == [3]
     assert (
         container.assist_orchestrators[0].enqueued[0].transcript_id == _TRANSCRIPT_ID
     )  # type: ignore[attr-defined]

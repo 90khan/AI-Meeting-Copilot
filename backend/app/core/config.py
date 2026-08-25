@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     environment: Environment = Environment.DEVELOPMENT
     debug: bool = False
     log_level: str = "INFO"
+    throughput_diagnostics_enabled: bool = False
     database_url: str = "sqlite+pysqlite:///./data/app.db"
     recordings_root_directory: Path = Path("./data/recordings")
     recording_segment_max_plaintext_bytes: int = 67_108_864

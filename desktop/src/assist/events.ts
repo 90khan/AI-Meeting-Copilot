@@ -10,6 +10,12 @@ import type { AssistAction } from "./state";
 const isNonBlankString = (value: unknown): value is string =>
   typeof value === "string" && value.trim().length > 0;
 
+function debugTranslationStage(stage: "event received" | "state updated"): void {
+  if (window.location.port === "1420") {
+    console.debug(`assist frontend ${stage} capability=translation`);
+  }
+}
+
 function transcriptPayload(value: unknown): TranscriptSegmentPayload | null {
   if (!value || typeof value !== "object") return null;
   const payload = value as Record<string, unknown>;
@@ -46,7 +52,11 @@ export async function subscribeToAssistEvents(dispatch: (action: AssistAction) =
     }),
     listen("assist://segment-update", (event) => {
       const payload = segmentUpdatePayload(event.payload);
-      if (active && payload) dispatch({ type: "segment-update", payload });
+      if (active && payload) {
+        if (payload.capability === "translation") debugTranslationStage("event received");
+        dispatch({ type: "segment-update", payload });
+        if (payload.capability === "translation") debugTranslationStage("state updated");
+      }
     }),
     listen("assist://reply-suggestions", (event) => {
       const payload = replySuggestionsPayload(event.payload);

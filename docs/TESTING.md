@@ -223,6 +223,178 @@ prompt, token, or audio data during validation. End the session, stop capture,
 and quit the app; this stops the WebSocket and sidecar while leaving the
 persisted Meeting transcript intact.
 
+## Opt-in Live-Audio Throughput Comparison
+
+Use this manual macOS-only diagnostic when a real-time capture falls behind.
+It emits only fixed metric labels, counts, queue depths, and monotonic elapsed
+times; it never emits audio, transcript text, prompts, provider responses,
+tokens, device identifiers, or endpoint details.
+
+Launch the development app from `desktop/` with the opt-in environment flag:
+
+```bash
+AI_MEETING_COPILOT_THROUGHPUT_DIAGNOSTICS_ENABLED=1 \
+AI_MEETING_COPILOT_LOG_LEVEL=INFO \
+npm run tauri:dev
+```
+
+Replay the same local audio workload through System Audio for at least three
+minutes in an A-B-A sequence: Assist disabled, then Assist with Turkish
+translation enabled while simplification and reply coaching are explicitly
+disabled, then Assist disabled again. Keep the backend process running across
+all three runs, and discard the initial warm-up interval before comparing
+results.
+
+Compare the terminal's `amcp-throughput` lines with the Rust capture lines:
+
+* `stt_completed elapsed_ms` for median and p95 STT latency;
+* `ollama_completed elapsed_ms`, `assist_capability_completed`, and
+  `assist_segment_completed` for Assist request and total work duration;
+* sender queue depth/wait and chunk cadence for backlog growth; and
+* native callback accepted/full-drop counts with processing input duration for
+  capture throughput.
+
+For a Turkish-translation failure, use the same opt-in stream to identify the
+safe boundary without exposing text or provider responses. A successful
+translation emits `assist_translation_started`, `ollama_started`,
+`ollama_response_received`, `assist_translation_response_received`, and
+`assist_translation_update_ready`. A failure carries only one fixed reason on
+`ollama_completed` or a response-validation stage: `connection_failed`,
+`timeout`, `http_status_error`, `request_failed`, `model_unavailable`,
+`malformed_response`, `empty_response`, `response_validation_failed`, or
+`provider_internal_error`.
+
+For every `stt_completed` line, sum `processed_audio_ms` and divide by the
+run's wall-clock duration to obtain processed-audio-seconds per wall-clock
+second. The same line carries `ollama_active_requests`, allowing the B run's
+STT latency to be grouped safely into Ollama-idle (`0`) and Ollama-active
+(`>0`) samples. The total WAV duration (`audio_duration_ms`) is also present
+for diagnosing overlap versus new audio; it must not be summed as source audio
+because overlapping chunks intentionally repeat audio.
+
+For cold-start analysis, preserve the first chunk rather than discarding it.
+`stt_provider_started first_request=yes`, `stt_model_ready model_loaded=yes`,
+and `model_load_ms` identify the one lazy model-construction call. Compare
+that request with later `first_request=no` entries. The installed
+Faster-Whisper implementation performs WAV decode, feature extraction, and
+token setup synchronously in `model.transcribe()`, reported as
+`audio_decode_conversion_ms`; its lazy segment iterator performs generation,
+reported as `stt_inference_ms`. The route also emits `entry_monotonic_ms`,
+`frame_parse_ms`, result
+serialization/send `elapsed_ms`, and `backend_total_ms`; all values remain
+structural and content-free.
+
+Do not treat model residency or a single slow chunk as proof of contention.
+Only a repeatable A-B-A comparison that shows a material Assist-on difference
+can establish local resource contention. Normal CI never enables these
+diagnostics.
+
+### Priority-scheduler D validation
+
+After the translation priority scheduler is enabled, run a D comparison under
+the same conditions as B: System Audio on, Microphone off, Assist and Turkish
+translation on, simplification and reply coaching off, the same local Ollama
+and Faster-Whisper settings, the same audio workload, and approximately the
+same duration. Do not alter chunking, queues, or timeouts between B, C, and D.
+
+The scheduler emits only structural states on
+`assist_translation_scheduler`. During continuous STT,
+`active_translation_count` must be at most one and
+`pending_translation_count` must be at most one. `busy`, `coalesced`, and
+`cancelled` mean a best-effort translation was deferred, superseded, or
+preempted; its transcript row remains correct and receives a terminal generic
+unavailable state rather than content from another segment.
+
+Compare D against B and C using STT/result latency over time, sender
+`queue_wait_ms`, queue depth, those scheduler counts, and native full-drop
+counts. The success criterion is that Assist-on transcription backlog recovers
+to zero rather than trends upward, with no source-audio loss caused by a full
+native-frame channel. This diagnostic does not prove OS-level cancellation of
+already-started local model work; note any short residual Ollama load after a
+preemption separately.
+
+### Translation-admission E validation
+
+Run E with the same conditions as D. The scheduler now derives a conservative
+translation admission forecast from the shortest of its four most recent STT
+start intervals and the slowest of its four most recent successful translation
+durations. It does not use a configured chunk-size assumption. A first
+translation may be a probe because no measured translation duration exists
+yet.
+
+For `assist_translation_scheduler state=started|deferred`, compare the closed
+`admission_reason`, `estimated_idle_window_ms`, and, after a successful
+translation exists, `estimated_translation_duration_ms`. In a steady speech
+cadence that cannot fit the measured translation duration, E should show
+`deferred` rather than repeated started/cancelled work. During a natural pause,
+an `extended_idle` admission may run the newest pending translation. Continue
+to require active/pending counts no greater than one, zero native full drops,
+and sender queue wait/depth that recover to zero. An unexpected STT arrival
+may still safely cancel an admitted translation; it must not increase STT
+latency or attach content to a different transcript row.
+
+### Extended-idle F validation
+
+Run F under the same workload and settings as E. The extended-idle fallback
+must not admit merely because the earliest predicted STT boundary passes. It
+waits through the bounded observed cadence-jitter margin, calculated as the
+difference between the longest and shortest recent STT-start intervals, or
+the measured translation duration, whichever is larger. The structural
+`extended_idle_margin_ms` field appears with scheduler admission metrics so
+this behavior can be verified without exposing user content.
+
+For an insufficient `predicted_window`, confirm that no
+`started admission_reason=extended_idle` line appears before the predicted
+boundary plus `extended_idle_margin_ms`. Pause the source audio beyond that
+derived boundary to permit the newest pending translation. Resume during an
+active translation to confirm cancellation remains safe, while sender queue
+wait/depth, STT latency, and native drop counts remain at their D/E healthy
+levels.
+
+### Backlog-aware G validation
+
+Run G with the same System Audio-only AXA workload and model settings as F.
+Each binary audio frame now carries only the current post-dequeue depth of the
+desktop's already-bounded sender FIFO (`upstream_pending_chunks`, an unsigned
+8-bit structural count). The backend does not depend on the desktop queue's
+capacity: it only treats a nonzero count as known STT work that must retain
+priority. This field never contains audio, transcript, device, path, or model
+data.
+
+During a slow STT outlier, a latest pending translation must emit
+`state=deferred admission_reason=upstream_backlog` with a nonzero
+`upstream_pending_stt_chunks` count. It must not emit
+`state=started admission_reason=extended_idle` until the serialized sender
+backlog reaches zero and the existing predicted-window or genuine
+extended-idle condition separately permits admission. Confirm active and
+logical pending translation counts stay at most one, and that an unexpected
+new STT start still preempts an active translation. The outer Assist queue is
+independently bounded and remains intentionally unchanged in G because it
+also preserves ordering for the other Assist capabilities.
+
+### Translation-only Assist outer-queue H validation
+
+Run H with the same G settings: System Audio on, Microphone off, Assist and
+Turkish translation on, simplification and reply coaching off. Translation-only
+sessions use a one-slot latest-value pending mailbox in front of the existing
+Assist worker. A newly accepted segment replaces only an older *not yet
+dequeued* translation-only segment; the worker's in-flight operation and all
+Task G STT-priority checks remain unchanged. Mixed-capability sessions retain
+the existing bounded segment FIFO so reply coaching and simplification keep
+their ordering semantics.
+
+For sustained speech, `assist_enqueued queue_depth` should remain at most one
+for waiting translation-only work, rather than staying at eight. Each
+replacement emits the content-free structural diagnostic
+`assist_outer_queue_coalesced capability=translation replaced_count=1
+queue_depth=1`. After a genuine Task G admission opportunity, the latest
+segment should be the one that emits `state=started`, then a translation-ready
+update. Superseded entries that never reached a processing state deliberately
+produce no user-facing terminal update; their replacement is observable only
+through the closed coalescing metric. Confirm a stop during a burst clears the
+mailbox promptly, and do not apply this expectation to sessions with reply
+coaching or simplification enabled.
+
 ---
 
 # Translation Testing

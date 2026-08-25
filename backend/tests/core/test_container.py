@@ -5,6 +5,8 @@ import asyncio
 import pytest
 from app.application.dto import AudioSource
 from app.application.dto.ai import LanguageCode, TranslationRequest, TranslationResult
+from app.application.dto.assist_mode import AssistUpdate
+from app.application.services import AssistModeConfiguration
 from app.application.use_cases import (
     AddTranscriptUseCase,
     CreateMeetingUseCase,
@@ -42,6 +44,13 @@ class _FakeTranslationProvider:
             source_language=request.source_language or LanguageCode(value="de"),
             target_language=request.target_language,
         )
+
+
+class _FakeAssistSink:
+    async def publish(self, update: AssistUpdate) -> None:
+        """Satisfy the transient Assist sink contract without retaining updates."""
+
+        del update
 
 
 def test_start_creates_an_engine_and_session_factory() -> None:
@@ -269,6 +278,37 @@ def test_translation_factories_are_fresh_and_do_not_call_provider_at_startup() -
         asyncio.run(container.stop())
 
 
+def test_assist_translation_does_not_require_disabled_capability_providers() -> None:
+    """A translation-only session remains constructible without other providers."""
+
+    container = Container(
+        Settings(
+            database_url="sqlite+pysqlite:///:memory:",
+            translation_provider="test-local",
+            german_simplification_provider="unconfigured",
+            reply_coaching_provider="unconfigured",
+        )
+    )
+    container.register_translation_provider_factory(_FakeTranslationProvider)
+    asyncio.run(container.start())
+
+    try:
+        orchestrator = container.get_assist_mode_orchestrator(
+            configuration=AssistModeConfiguration(
+                translation_enabled=True,
+                simplification_enabled=False,
+                reply_coaching_enabled=False,
+            ),
+            update_sink=_FakeAssistSink(),
+        )
+
+        assert orchestrator._translation_use_case is not None
+        assert orchestrator._simplification_use_case is None
+        assert orchestrator._reply_suggestions_use_case is None
+    finally:
+        asyncio.run(container.stop())
+
+
 def test_review_factories_are_fresh_lazy_and_inject_stable_metadata() -> None:
     """Review composition reuses one lazy local client without startup generation."""
 
@@ -276,6 +316,9 @@ def test_review_factories_are_fresh_lazy_and_inject_stable_metadata() -> None:
         Settings(
             database_url="sqlite+pysqlite:///:memory:",
             ollama_meeting_summarization_model="review-model",
+            translation_provider="unconfigured",
+            german_simplification_provider="unconfigured",
+            reply_coaching_provider="unconfigured",
         )
     )
     asyncio.run(container.start())

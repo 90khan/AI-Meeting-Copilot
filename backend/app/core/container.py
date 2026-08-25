@@ -33,6 +33,7 @@ from app.application.services import (
     AssistModeConfiguration,
     AssistModeOrchestrator,
     AssistUpdateSink,
+    LiveTranscriptionPriorityGate,
     MeetingReviewBatcher,
     MeetingReviewMerger,
     RecordingRetentionCleanupService,
@@ -112,6 +113,7 @@ class Container:
             recording_key_store_factory or _create_recording_key_store
         )
         self._settings = settings
+        self._live_transcription_priority_gate = LiveTranscriptionPriorityGate()
         self._engine: Engine | None = None
         self._session_factory: sessionmaker[Session] | None = None
         self._speech_to_text_provider_factory: SpeechToTextProviderFactory | None = None
@@ -594,10 +596,23 @@ class Container:
         self._require_started()
         return AssistModeOrchestrator(
             configuration=configuration,
-            translation_use_case=self.get_translate_transcript_segment_use_case(),
-            simplification_use_case=self.get_simplify_transcript_segment_use_case(),
-            reply_suggestions_use_case=self.get_generate_reply_suggestions_use_case(),
+            translation_use_case=(
+                self.get_translate_transcript_segment_use_case()
+                if configuration.translation_enabled
+                else None
+            ),
+            simplification_use_case=(
+                self.get_simplify_transcript_segment_use_case()
+                if configuration.simplification_enabled
+                else None
+            ),
+            reply_suggestions_use_case=(
+                self.get_generate_reply_suggestions_use_case()
+                if configuration.reply_coaching_enabled
+                else None
+            ),
             update_sink=update_sink,
+            priority_gate=self._live_transcription_priority_gate,
         )
 
     def get_live_transcription_session(
@@ -685,6 +700,11 @@ class Container:
                 model_manager=model_manager,
                 beam_size=self._settings.faster_whisper_beam_size,
                 vad_enabled=self._settings.faster_whisper_vad_enabled,
+                model_name=self._settings.faster_whisper_model,
+                device=self._settings.faster_whisper_device,
+                compute_type=self._settings.faster_whisper_compute_type,
+                cpu_threads=self._settings.faster_whisper_cpu_threads,
+                priority_gate=self._live_transcription_priority_gate,
             )
         )
 

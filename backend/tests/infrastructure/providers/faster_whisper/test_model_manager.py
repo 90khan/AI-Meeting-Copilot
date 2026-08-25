@@ -62,6 +62,16 @@ def test_first_get_model_loads_once_and_reuses_the_model() -> None:
     assert len(calls) == 1
 
 
+def test_load_state_identifies_only_the_lazy_model_construction() -> None:
+    """Latency diagnostics can distinguish cold model construction safely."""
+
+    model = FakeWhisperModel()
+    manager = make_manager(lambda *_args, **_kwargs: model)
+
+    assert manager.get_model_with_load_state() == (model, True)
+    assert manager.get_model_with_load_state() == (model, False)
+
+
 def test_concurrent_get_model_calls_load_once() -> None:
     """The loading lock prevents duplicate model construction."""
 

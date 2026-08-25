@@ -105,11 +105,30 @@ public func amcpAudioCaptureBridgeStatusPlaceholder(_ handle: UnsafeMutableRawPo
     }
 }
 
-private func copyJSONBuffer(_ payload: String?) -> UnsafeMutablePointer<CChar>? {
+private func copyJSONBuffer(
+    _ payload: String?,
+    source: String
+) -> UnsafeMutablePointer<CChar>? {
     guard let payload else {
         return nil
     }
-    return strdup(payload)
+    let buffer = strdup(payload)
+    if buffer == nil {
+        logEnumerationBridgeClassification(source, classification: "buffer_copy_failed")
+    }
+    return buffer
+}
+
+private func logDisplayBridgeEntry() {
+#if DEBUG
+    FileHandle.standardError.write(Data("audio-capture bridge display entered\n".utf8))
+#endif
+}
+
+private func logMicrophoneBridgeEntry() {
+#if DEBUG
+    FileHandle.standardError.write(Data("audio-capture bridge microphone entered\n".utf8))
+#endif
 }
 
 @_cdecl("amcp_audio_capture_bridge_free_json_buffer")
@@ -127,7 +146,7 @@ public func amcpAudioCaptureBridgeScreenAuthorizationState(
     guard handle != nil else {
         return nil
     }
-    return copyJSONBuffer(screenAuthorizationPayload())
+    return copyJSONBuffer(screenAuthorizationPayload(), source: "authorization")
 }
 
 @_cdecl("amcp_audio_capture_bridge_request_screen_authorization")
@@ -137,7 +156,7 @@ public func amcpAudioCaptureBridgeRequestScreenAuthorization(
     guard handle != nil else {
         return nil
     }
-    return copyJSONBuffer(requestScreenAuthorizationPayload())
+    return copyJSONBuffer(requestScreenAuthorizationPayload(), source: "authorization")
 }
 
 @_cdecl("amcp_audio_capture_bridge_microphone_authorization_state")
@@ -147,7 +166,7 @@ public func amcpAudioCaptureBridgeMicrophoneAuthorizationState(
     guard handle != nil else {
         return nil
     }
-    return copyJSONBuffer(microphoneAuthorizationPayload())
+    return copyJSONBuffer(microphoneAuthorizationPayload(), source: "authorization")
 }
 
 @_cdecl("amcp_audio_capture_bridge_request_microphone_authorization")
@@ -157,7 +176,7 @@ public func amcpAudioCaptureBridgeRequestMicrophoneAuthorization(
     guard handle != nil else {
         return nil
     }
-    return copyJSONBuffer(requestMicrophoneAuthorizationPayload())
+    return copyJSONBuffer(requestMicrophoneAuthorizationPayload(), source: "authorization")
 }
 
 @_cdecl("amcp_audio_capture_bridge_list_displays")
@@ -167,7 +186,8 @@ public func amcpAudioCaptureBridgeListDisplays(
     guard handle != nil else {
         return nil
     }
-    return copyJSONBuffer(displaySourcesPayload())
+    logDisplayBridgeEntry()
+    return copyJSONBuffer(displaySourcesPayload(), source: "display")
 }
 
 @_cdecl("amcp_audio_capture_bridge_list_microphones")
@@ -177,7 +197,8 @@ public func amcpAudioCaptureBridgeListMicrophones(
     guard handle != nil else {
         return nil
     }
-    return copyJSONBuffer(microphoneSourcesPayload())
+    logMicrophoneBridgeEntry()
+    return copyJSONBuffer(microphoneSourcesPayload(), source: "microphone")
 }
 
 @_cdecl("amcp_audio_capture_bridge_start_capture")

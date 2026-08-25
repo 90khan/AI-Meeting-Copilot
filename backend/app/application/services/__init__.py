@@ -6,6 +6,9 @@ from app.application.services.assist_mode_orchestrator import (
     AssistModeOrchestrator,
     AssistUpdateSink,
 )
+from app.application.services.live_transcription_priority_gate import (
+    LiveTranscriptionPriorityGate,
+)
 from app.application.services.meeting_review_batcher import MeetingReviewBatcher
 from app.application.services.meeting_review_merger import MeetingReviewMerger
 from app.application.services.recent_transcript_context import RecentTranscriptContext
@@ -33,6 +36,7 @@ __all__ = [
     "AssistModeLifecycleState",
     "AssistModeOrchestrator",
     "AssistUpdateSink",
+    "LiveTranscriptionPriorityGate",
     "MeetingReviewBatcher",
     "MeetingReviewMerger",
     "RecentTranscriptContext",

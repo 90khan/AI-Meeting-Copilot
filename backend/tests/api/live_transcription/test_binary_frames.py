@@ -23,7 +23,9 @@ _TIMESTAMP = datetime(2026, 8, 2, 12, 30, 45, 123_000, tzinfo=UTC)
 _PAYLOAD = b"RIFF-payload"
 
 
-def _metadata(*, byte_length: int = len(_PAYLOAD)) -> AudioChunkFrameMetadata:
+def _metadata(
+    *, byte_length: int = len(_PAYLOAD), upstream_pending_chunks: int = 0
+) -> AudioChunkFrameMetadata:
     return AudioChunkFrameMetadata(
         session_id=_SESSION_ID,
         sequence=7,
@@ -33,6 +35,7 @@ def _metadata(*, byte_length: int = len(_PAYLOAD)) -> AudioChunkFrameMetadata:
         sample_rate_hz=16_000,
         channels=1,
         overlap_seconds=0.5,
+        upstream_pending_chunks=upstream_pending_chunks,
         byte_length=byte_length,
     )
 
@@ -62,6 +65,31 @@ def test_binary_frame_round_trip_uses_compact_deterministic_metadata() -> None:
     assert parse_audio_chunk_frame(frame) == (metadata, _PAYLOAD)
     assert b" " not in metadata_bytes
     assert json.loads(metadata_bytes)["capture_started_at"].endswith("Z")
+
+
+def test_binary_frame_carries_only_a_non_negative_structural_backlog_count() -> None:
+    """The admission signal is bounded metadata, never retained audio content."""
+
+    metadata = _metadata(upstream_pending_chunks=3)
+    frame = build_audio_chunk_frame(metadata=metadata, wav_payload=_PAYLOAD)
+
+    parsed_metadata, _ = parse_audio_chunk_frame(frame)
+    assert parsed_metadata.upstream_pending_chunks == 3
+
+    for invalid_pending_chunks in (-1, 256):
+        with pytest.raises(ApplicationValidationError):
+            AudioChunkFrameMetadata(
+                session_id=_SESSION_ID,
+                sequence=0,
+                capture_started_at=_TIMESTAMP,
+                source=AudioSource.MIXED,
+                audio_format=AudioFormat.WAV,
+                sample_rate_hz=16_000,
+                channels=1,
+                overlap_seconds=0.5,
+                upstream_pending_chunks=invalid_pending_chunks,
+                byte_length=1,
+            )
 
 
 @pytest.mark.parametrize(
@@ -122,6 +150,7 @@ def test_incorrect_declared_payload_length_is_rejected() -> None:
         "sample_rate_hz": 16_000,
         "channels": 1,
         "overlap_seconds": 0.5,
+        "upstream_pending_chunks": 0,
         "byte_length": len(_PAYLOAD) + 1,
     }
 
@@ -160,6 +189,7 @@ def test_invalid_audio_metadata_is_rejected(field: str, value: object) -> None:
         "sample_rate_hz": 16_000,
         "channels": 1,
         "overlap_seconds": 0.5,
+        "upstream_pending_chunks": 0,
         "byte_length": len(_PAYLOAD),
     }
     payload[field] = value
@@ -181,6 +211,7 @@ def test_non_utc_metadata_timestamp_is_rejected() -> None:
             sample_rate_hz=16_000,
             channels=1,
             overlap_seconds=0.5,
+            upstream_pending_chunks=0,
             byte_length=1,
         )
 

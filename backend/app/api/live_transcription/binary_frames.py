@@ -17,6 +17,7 @@ from app.application.dto.live_transcription import AudioSource
 from app.application.exceptions import ApplicationValidationError
 
 _FRAME_HEADER_LENGTH = 8
+_MAX_UPSTREAM_PENDING_CHUNKS = 255
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -31,6 +32,7 @@ class AudioChunkFrameMetadata:
     sample_rate_hz: int
     channels: int
     overlap_seconds: float
+    upstream_pending_chunks: int
     byte_length: int
 
     def __post_init__(self) -> None:
@@ -58,6 +60,14 @@ class AudioChunkFrameMetadata:
         ):
             raise ApplicationValidationError(
                 "Audio frame overlap must be a non-negative finite value."
+            )
+        _validate_non_negative_integer(
+            self.upstream_pending_chunks,
+            "Audio frame upstream pending chunks",
+        )
+        if self.upstream_pending_chunks > _MAX_UPSTREAM_PENDING_CHUNKS:
+            raise ApplicationValidationError(
+                "Audio frame upstream pending chunks are invalid."
             )
         _validate_positive_integer(self.byte_length, "Audio frame byte length")
 
@@ -152,6 +162,7 @@ def _metadata_to_payload(metadata: AudioChunkFrameMetadata) -> dict[str, object]
         "sequence": metadata.sequence,
         "session_id": str(metadata.session_id),
         "source": metadata.source.value,
+        "upstream_pending_chunks": metadata.upstream_pending_chunks,
     }
 
 
@@ -167,6 +178,7 @@ def _metadata_from_payload(payload: dict[object, object]) -> AudioChunkFrameMeta
         "sample_rate_hz",
         "channels",
         "overlap_seconds",
+        "upstream_pending_chunks",
         "byte_length",
     }
     if set(payload) != expected_fields:
@@ -187,6 +199,9 @@ def _metadata_from_payload(payload: dict[object, object]) -> AudioChunkFrameMeta
             sample_rate_hz=_require_integer(payload, "sample_rate_hz"),
             channels=_require_integer(payload, "channels"),
             overlap_seconds=_require_number(payload, "overlap_seconds"),
+            upstream_pending_chunks=_require_integer(
+                payload, "upstream_pending_chunks"
+            ),
             byte_length=_require_integer(payload, "byte_length"),
         )
     except (TypeError, ValueError) as error:

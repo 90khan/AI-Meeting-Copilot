@@ -14,6 +14,9 @@ use std::{
     },
 };
 
+#[cfg(debug_assertions)]
+use std::{sync::atomic::AtomicU64, time::Instant};
+
 use thiserror::Error;
 
 use super::{
@@ -33,6 +36,12 @@ use super::{
 const NATIVE_SUCCESS: i32 = 0;
 const NATIVE_STATUS_STOPPED: i32 = 0;
 const NATIVE_STATUS_CAPTURING: i32 = 1;
+
+/// Native callbacks are normally roughly 10 ms apart. Reporting every 500
+/// validated frames gives useful multi-second throughput evidence without
+/// writing one diagnostic per callback.
+#[cfg(debug_assertions)]
+const CALLBACK_THROUGHPUT_REPORT_INTERVAL: u64 = 500;
 
 /// Private FFI seam so lifecycle ownership can be tested without Swift.
 pub(crate) trait SwiftAudioCaptureFunctions: Send {
@@ -62,8 +71,167 @@ pub(crate) trait SwiftAudioCaptureFunctions: Send {
 type NativeFrameCallback =
     extern "C" fn(*mut c_void, u8, u32, u16, u8, bool, f64, *const c_void, usize);
 
+#[cfg(debug_assertions)]
+#[derive(Default)]
+struct CallbackSourceMetrics {
+    valid_frame_count: AtomicU64,
+    input_microseconds: AtomicU64,
+    accepted_frame_count: AtomicU64,
+    accepted_microseconds: AtomicU64,
+    dropped_full_count: AtomicU64,
+    dropped_full_microseconds: AtomicU64,
+    dropped_closed_count: AtomicU64,
+    dropped_closed_microseconds: AtomicU64,
+}
+
+#[cfg(debug_assertions)]
+impl CallbackSourceMetrics {
+    fn record_input(&self, duration_microseconds: u64) {
+        self.valid_frame_count.fetch_add(1, Ordering::Relaxed);
+        self.input_microseconds
+            .fetch_add(duration_microseconds, Ordering::Relaxed);
+    }
+
+    fn record_accepted(&self, duration_microseconds: u64) {
+        self.accepted_frame_count.fetch_add(1, Ordering::Relaxed);
+        self.accepted_microseconds
+            .fetch_add(duration_microseconds, Ordering::Relaxed);
+    }
+
+    /// Returns true only for the first observed drop of this class.
+    fn record_dropped_full(&self, duration_microseconds: u64) -> bool {
+        self.dropped_full_microseconds
+            .fetch_add(duration_microseconds, Ordering::Relaxed);
+        self.dropped_full_count.fetch_add(1, Ordering::Relaxed) == 0
+    }
+
+    /// Returns true only for the first observed drop of this class.
+    fn record_dropped_closed(&self, duration_microseconds: u64) -> bool {
+        self.dropped_closed_microseconds
+            .fetch_add(duration_microseconds, Ordering::Relaxed);
+        self.dropped_closed_count.fetch_add(1, Ordering::Relaxed) == 0
+    }
+
+    fn snapshot(&self) -> CallbackSourceMetricsSnapshot {
+        CallbackSourceMetricsSnapshot {
+            input_ms: self.input_microseconds.load(Ordering::Relaxed) / 1_000,
+            accepted_ms: self.accepted_microseconds.load(Ordering::Relaxed) / 1_000,
+            valid_frame_count: self.valid_frame_count.load(Ordering::Relaxed),
+            accepted_frame_count: self.accepted_frame_count.load(Ordering::Relaxed),
+            dropped_full_count: self.dropped_full_count.load(Ordering::Relaxed),
+            dropped_full_ms: self.dropped_full_microseconds.load(Ordering::Relaxed) / 1_000,
+            dropped_closed_count: self.dropped_closed_count.load(Ordering::Relaxed),
+            dropped_closed_ms: self.dropped_closed_microseconds.load(Ordering::Relaxed) / 1_000,
+        }
+    }
+}
+
+#[cfg(debug_assertions)]
+struct CallbackSourceMetricsSnapshot {
+    input_ms: u64,
+    accepted_ms: u64,
+    valid_frame_count: u64,
+    accepted_frame_count: u64,
+    dropped_full_count: u64,
+    dropped_full_ms: u64,
+    dropped_closed_count: u64,
+    dropped_closed_ms: u64,
+}
+
+#[cfg(debug_assertions)]
+struct CallbackThroughputMetrics {
+    started_at: Instant,
+    valid_callback_count: AtomicU64,
+    system: CallbackSourceMetrics,
+    microphone: CallbackSourceMetrics,
+}
+
+#[cfg(debug_assertions)]
+impl CallbackThroughputMetrics {
+    fn new() -> Self {
+        Self {
+            started_at: Instant::now(),
+            valid_callback_count: AtomicU64::new(0),
+            system: CallbackSourceMetrics::default(),
+            microphone: CallbackSourceMetrics::default(),
+        }
+    }
+
+    fn source_metrics(&self, source: NativeAudioSource) -> &CallbackSourceMetrics {
+        match source {
+            NativeAudioSource::SystemAudio => &self.system,
+            NativeAudioSource::Microphone => &self.microphone,
+        }
+    }
+
+    fn record_input(&self, source: NativeAudioSource, duration_microseconds: u64) -> u64 {
+        self.source_metrics(source)
+            .record_input(duration_microseconds);
+        self.valid_callback_count.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    fn record_accepted(&self, source: NativeAudioSource, duration_microseconds: u64) {
+        self.source_metrics(source)
+            .record_accepted(duration_microseconds);
+    }
+
+    fn record_dropped_full(&self, source: NativeAudioSource, duration_microseconds: u64) -> bool {
+        self.source_metrics(source)
+            .record_dropped_full(duration_microseconds)
+    }
+
+    fn record_dropped_closed(&self, source: NativeAudioSource, duration_microseconds: u64) -> bool {
+        self.source_metrics(source)
+            .record_dropped_closed(duration_microseconds)
+    }
+
+    fn report_if_due(&self, generation: u64, valid_callback_count: u64) {
+        if valid_callback_count % CALLBACK_THROUGHPUT_REPORT_INTERVAL != 0 {
+            return;
+        }
+        self.report(generation, valid_callback_count, "periodic");
+    }
+
+    fn report_at_stop(&self, generation: u64) {
+        self.report(
+            generation,
+            self.valid_callback_count.load(Ordering::Relaxed),
+            "stopped",
+        );
+    }
+
+    fn report(&self, generation: u64, valid_callback_count: u64, phase: &'static str) {
+        let system = self.system.snapshot();
+        let microphone = self.microphone.snapshot();
+        eprintln!(
+            "audio-capture native callback throughput phase={phase} generation={generation} elapsed_ms={} valid_frame_count={valid_callback_count} system_input_ms={} system_accepted_ms={} system_valid_frame_count={} system_accepted_frame_count={} system_dropped_full_count={} system_dropped_full_ms={} system_dropped_closed_count={} system_dropped_closed_ms={} microphone_input_ms={} microphone_accepted_ms={} microphone_valid_frame_count={} microphone_accepted_frame_count={} microphone_dropped_full_count={} microphone_dropped_full_ms={} microphone_dropped_closed_count={} microphone_dropped_closed_ms={}",
+            self.started_at.elapsed().as_millis(),
+            system.input_ms,
+            system.accepted_ms,
+            system.valid_frame_count,
+            system.accepted_frame_count,
+            system.dropped_full_count,
+            system.dropped_full_ms,
+            system.dropped_closed_count,
+            system.dropped_closed_ms,
+            microphone.input_ms,
+            microphone.accepted_ms,
+            microphone.valid_frame_count,
+            microphone.accepted_frame_count,
+            microphone.dropped_full_count,
+            microphone.dropped_full_ms,
+            microphone.dropped_closed_count,
+            microphone.dropped_closed_ms,
+        );
+    }
+}
+
 struct CallbackState {
     accepting: AtomicBool,
+    #[cfg(debug_assertions)]
+    generation: u64,
+    #[cfg(debug_assertions)]
+    throughput_metrics: CallbackThroughputMetrics,
     sender: Mutex<Option<NativeAudioFrameSender>>,
 }
 
@@ -202,7 +370,73 @@ pub(crate) enum SwiftAudioCaptureBridgeError {
     #[error("The native audio capture bridge did not return data.")]
     NativeDataUnavailable,
     #[error("The native audio capture bridge returned invalid data.")]
+    PayloadUtf8Failed,
+    #[error("The native audio capture bridge returned invalid data.")]
+    JsonParseFailed,
+    #[error("The native audio capture bridge returned invalid data.")]
+    TopLevelShapeMismatch,
+    #[error("The native audio capture bridge returned invalid data.")]
+    DtoValidationFailed,
+    #[error("The native audio capture bridge returned invalid data.")]
+    DisplayFieldSetMismatch,
+    #[error("The native audio capture bridge returned invalid data.")]
+    DisplayIdTypeMismatch,
+    #[error("The native audio capture bridge returned invalid data.")]
+    DisplayIdOutOfRange,
+    #[error("The native audio capture bridge returned invalid data.")]
+    DisplayWidthTypeMismatch,
+    #[error("The native audio capture bridge returned invalid data.")]
+    DisplayWidthZero,
+    #[error("The native audio capture bridge returned invalid data.")]
+    DisplayWidthOutOfRange,
+    #[error("The native audio capture bridge returned invalid data.")]
+    DisplayHeightTypeMismatch,
+    #[error("The native audio capture bridge returned invalid data.")]
+    DisplayHeightZero,
+    #[error("The native audio capture bridge returned invalid data.")]
+    DisplayHeightOutOfRange,
+    #[error("The native audio capture bridge returned invalid data.")]
+    DisplayIsPrimaryTypeMismatch,
+    #[error("The native audio capture bridge returned invalid data.")]
+    MicrophoneFieldSetMismatch,
+    #[error("The native audio capture bridge returned invalid data.")]
+    MicrophoneIdTypeMismatch,
+    #[error("The native audio capture bridge returned invalid data.")]
+    MicrophoneIdBlank,
+    #[error("The native audio capture bridge returned invalid data.")]
+    MicrophoneIsDefaultTypeMismatch,
+    #[error("The native audio capture bridge returned invalid data.")]
     MalformedNativePayload,
+}
+
+impl SwiftAudioCaptureBridgeError {
+    #[cfg(debug_assertions)]
+    pub(crate) fn enumeration_diagnostic(&self) -> String {
+        match self {
+            Self::PayloadUtf8Failed => "payload_utf8_failed".to_owned(),
+            Self::JsonParseFailed => "json_parse_failed".to_owned(),
+            Self::TopLevelShapeMismatch => "top_level_shape_mismatch".to_owned(),
+            Self::DtoValidationFailed => "dto_validation_failed".to_owned(),
+            Self::DisplayFieldSetMismatch | Self::MicrophoneFieldSetMismatch => {
+                "field_set_mismatch".to_owned()
+            }
+            Self::DisplayIdTypeMismatch | Self::MicrophoneIdTypeMismatch => {
+                "id_type_mismatch".to_owned()
+            }
+            Self::DisplayIdOutOfRange => "id_out_of_range".to_owned(),
+            Self::DisplayWidthTypeMismatch => "width_type_mismatch".to_owned(),
+            Self::DisplayWidthZero => "width_zero".to_owned(),
+            Self::DisplayWidthOutOfRange => "width_out_of_range".to_owned(),
+            Self::DisplayHeightTypeMismatch => "height_type_mismatch".to_owned(),
+            Self::DisplayHeightZero => "height_zero".to_owned(),
+            Self::DisplayHeightOutOfRange => "height_out_of_range".to_owned(),
+            Self::DisplayIsPrimaryTypeMismatch => "is_primary_type_mismatch".to_owned(),
+            Self::MicrophoneIdBlank => "id_blank".to_owned(),
+            Self::MicrophoneIsDefaultTypeMismatch => "is_default_type_mismatch".to_owned(),
+            Self::NativeDataUnavailable => "native_data_unavailable".to_owned(),
+            _ => "bridge_failed".to_owned(),
+        }
+    }
 }
 
 /// Owns a single Swift object handle without exposing it outside this module.
@@ -335,6 +569,8 @@ impl<F: SwiftAudioCaptureFunctions> SwiftAudioCaptureBridge<F> {
         let payload = unsafe { CStr::from_ptr(buffer.as_ptr()).to_bytes().to_vec() };
         // Copy before release, then free the owned Swift buffer exactly once.
         self.functions.free_json_buffer(buffer.as_ptr());
+        std::str::from_utf8(&payload)
+            .map_err(|_| SwiftAudioCaptureBridgeError::PayloadUtf8Failed)?;
         Ok(payload)
     }
 
@@ -399,9 +635,57 @@ extern "C" fn receive_native_frame(
     let Ok(frame) = NativeAudioFrame::new(source, format, timestamp, samples) else {
         return;
     };
-    if let Some(sender) = state.sender.lock().ok().and_then(|guard| guard.clone()) {
-        let _ = sender.try_send(frame);
+    #[cfg(debug_assertions)]
+    let frame_duration_microseconds = frame.duration_microseconds();
+    #[cfg(debug_assertions)]
+    let valid_callback_count = state
+        .throughput_metrics
+        .record_input(source, frame_duration_microseconds);
+    #[cfg(debug_assertions)]
+    if valid_callback_count == 1 {
+        eprintln!(
+            "audio-capture callback received count=1 generation={}",
+            state.generation
+        );
     }
+    if let Some(sender) = state.sender.lock().ok().and_then(|guard| guard.clone()) {
+        #[cfg(debug_assertions)]
+        let generation = sender.generation();
+        match sender.try_send(frame) {
+            Ok(()) => {
+                #[cfg(debug_assertions)]
+                state
+                    .throughput_metrics
+                    .record_accepted(source, frame_duration_microseconds);
+            }
+            Err(super::bridge::NativeAudioFrameSendError::Full) => {
+                #[cfg(debug_assertions)]
+                if state
+                    .throughput_metrics
+                    .record_dropped_full(source, frame_duration_microseconds)
+                {
+                    eprintln!(
+                        "audio-capture callback frame dropped reason=channel_full generation={generation}"
+                    );
+                }
+            }
+            Err(super::bridge::NativeAudioFrameSendError::Closed) => {
+                #[cfg(debug_assertions)]
+                if state
+                    .throughput_metrics
+                    .record_dropped_closed(source, frame_duration_microseconds)
+                {
+                    eprintln!(
+                        "audio-capture callback frame dropped reason=channel_closed generation={generation}"
+                    );
+                }
+            }
+        }
+    }
+    #[cfg(debug_assertions)]
+    state
+        .throughput_metrics
+        .report_if_due(state.generation, valid_callback_count);
 }
 
 impl<F: SwiftAudioCaptureFunctions> NativeAudioCaptureBridge for SwiftAudioCaptureBridge<F> {
@@ -415,6 +699,10 @@ impl<F: SwiftAudioCaptureFunctions> NativeAudioCaptureBridge for SwiftAudioCaptu
         }
         let state = Arc::new(CallbackState {
             accepting: AtomicBool::new(true),
+            #[cfg(debug_assertions)]
+            generation: frame_sender.generation(),
+            #[cfg(debug_assertions)]
+            throughput_metrics: CallbackThroughputMetrics::new(),
             sender: Mutex::new(Some(frame_sender)),
         });
         let callback_context = Arc::into_raw(state.clone());
@@ -450,6 +738,8 @@ impl<F: SwiftAudioCaptureFunctions> NativeAudioCaptureBridge for SwiftAudioCaptu
             return Err(NativeAudioCaptureBridgeError::StopFailed);
         }
         if let Some(state) = self.callback_state.take() {
+            #[cfg(debug_assertions)]
+            state.throughput_metrics.report_at_stop(state.generation);
             state.accepting.store(false, Ordering::Release);
             *state
                 .sender
@@ -509,10 +799,12 @@ mod tests {
     };
     use tokio::sync::mpsc;
 
+    #[cfg(debug_assertions)]
+    use super::CallbackThroughputMetrics;
     use super::{
         receive_native_frame, AudioCaptureConfiguration, AudioCaptureState, CallbackState,
-        NativeAudioFrameSender, NativeFrameCallback, SwiftAudioCaptureBridge,
-        SwiftAudioCaptureBridgeError, SwiftAudioCaptureFunctions,
+        NativeAudioCaptureBridge, NativeAudioFrameSender, NativeFrameCallback,
+        SwiftAudioCaptureBridge, SwiftAudioCaptureBridgeError, SwiftAudioCaptureFunctions,
     };
 
     #[derive(Clone)]
@@ -527,6 +819,7 @@ mod tests {
         stops: usize,
         status: i32,
         screen_payload: Option<String>,
+        last_capture_configuration: Option<AudioCaptureConfiguration>,
     }
 
     impl FakeFunctions {
@@ -539,6 +832,7 @@ mod tests {
                     stops: 0,
                     status,
                     screen_payload: Some(r#"{"state":"authorized"}"#.to_owned()),
+                    last_capture_configuration: None,
                 })),
             }
         }
@@ -626,11 +920,13 @@ mod tests {
         fn start_capture(
             &self,
             _handle: *mut c_void,
-            _configuration: &AudioCaptureConfiguration,
+            configuration: &AudioCaptureConfiguration,
             _callback: NativeFrameCallback,
             _context: *mut c_void,
         ) -> i32 {
-            self.state.lock().expect("state is available").status = 1;
+            let mut state = self.state.lock().expect("state is available");
+            state.status = 1;
+            state.last_capture_configuration = Some(configuration.clone());
             0
         }
 
@@ -770,6 +1066,10 @@ mod tests {
         let (sender, mut receiver) = mpsc::channel(1);
         let state = Arc::new(CallbackState {
             accepting: AtomicBool::new(true),
+            #[cfg(debug_assertions)]
+            generation: 0,
+            #[cfg(debug_assertions)]
+            throughput_metrics: CallbackThroughputMetrics::new(),
             sender: Mutex::new(Some(NativeAudioFrameSender::new(sender))),
         });
         let context = Arc::into_raw(state.clone()).cast_mut().cast::<c_void>();
@@ -785,6 +1085,19 @@ mod tests {
             float_samples.as_ptr().cast(),
             float_samples.len(),
         );
+        // The callback remains non-blocking when the bounded native handoff
+        // is full; debug metrics retain only the structural drop count.
+        receive_native_frame(
+            context,
+            1,
+            48_000,
+            2,
+            1,
+            true,
+            1.1,
+            float_samples.as_ptr().cast(),
+            float_samples.len(),
+        );
         let frame = receiver.try_recv().expect("frame is copied");
         assert_eq!(
             frame.source(),
@@ -794,6 +1107,14 @@ mod tests {
         assert!(
             matches!(frame.samples(), crate::audio_capture::types::NativeAudioSamples::Float32(values) if values == &float_samples)
         );
+        #[cfg(debug_assertions)]
+        {
+            let system_metrics = state.throughput_metrics.system.snapshot();
+            assert_eq!(system_metrics.valid_frame_count, 2);
+            assert_eq!(system_metrics.accepted_frame_count, 1);
+            assert_eq!(system_metrics.dropped_full_count, 1);
+            assert_eq!(system_metrics.dropped_closed_count, 0);
+        }
         state.accepting.store(false, Ordering::Release);
         let int_samples = [1_i16];
         receive_native_frame(
@@ -811,5 +1132,77 @@ mod tests {
         unsafe {
             drop(Arc::from_raw(context.cast::<CallbackState>()));
         }
+    }
+
+    #[test]
+    fn callback_preserves_noninterleaved_system_audio_planes() {
+        let (sender, mut receiver) = mpsc::channel(1);
+        let state = Arc::new(CallbackState {
+            accepting: AtomicBool::new(true),
+            #[cfg(debug_assertions)]
+            generation: 0,
+            #[cfg(debug_assertions)]
+            throughput_metrics: CallbackThroughputMetrics::new(),
+            sender: Mutex::new(Some(NativeAudioFrameSender::new(sender))),
+        });
+        let context = Arc::into_raw(Arc::clone(&state))
+            .cast_mut()
+            .cast::<c_void>();
+        // ScreenCaptureKit can expose one Float32 plane per channel. The
+        // native boundary concatenates those planes and labels the frame as
+        // non-interleaved so Rust's mixer can retain their channel layout.
+        let channel_planes = [0.25_f32, -0.25_f32, 0.75_f32, -0.75_f32];
+
+        receive_native_frame(
+            context,
+            1,
+            48_000,
+            2,
+            1,
+            false,
+            1.0,
+            channel_planes.as_ptr().cast(),
+            channel_planes.len(),
+        );
+
+        let frame = receiver.try_recv().expect("system frame is copied");
+        assert_eq!(
+            frame.source(),
+            crate::audio_capture::types::NativeAudioSource::SystemAudio
+        );
+        assert!(!frame.format().interleaved());
+        assert!(
+            matches!(frame.samples(), crate::audio_capture::types::NativeAudioSamples::Float32(values) if values == &channel_planes)
+        );
+
+        state.accepting.store(false, Ordering::Release);
+        unsafe {
+            drop(Arc::from_raw(context.cast::<CallbackState>()));
+        }
+    }
+
+    #[test]
+    fn forwards_system_only_configuration_to_the_native_start_boundary() {
+        let functions = FakeFunctions::new(0);
+        let state = Arc::clone(&functions.state);
+        let mut bridge = SwiftAudioCaptureBridge::with_functions(functions).expect("creates");
+        let (sender, _receiver) = mpsc::channel(1);
+        let configuration = AudioCaptureConfiguration::new(7, None, true, false, true)
+            .expect("system-only configuration");
+
+        NativeAudioCaptureBridge::start(
+            &mut bridge,
+            &configuration,
+            NativeAudioFrameSender::new(sender),
+        )
+        .expect("starts native capture");
+
+        assert_eq!(
+            state
+                .lock()
+                .expect("state is available")
+                .last_capture_configuration,
+            Some(configuration)
+        );
     }
 }
