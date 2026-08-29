@@ -289,6 +289,114 @@ Only a repeatable A-B-A comparison that shows a material Assist-on difference
 can establish local resource contention. Normal CI never enables these
 diagnostics.
 
+## Offline STT and Turkish Translation Quality Baseline
+
+Quality evaluation is deliberately separate from the live WebSocket, Assist,
+and throughput-diagnostic paths. It accepts developer-supplied reference text
+and optional local WAV paths, so private recordings are never added to Git or
+written to normal production telemetry.
+
+Create a local JSON fixture outside the repository when it contains private
+audio or conversation text:
+
+```json
+{
+  "cases": [
+    {
+      "id": "local-axa-sample",
+      "reference_de": "Expected German passage.",
+      "reference_tr": "Optional human Turkish reference.",
+      "audio_path": "local-axa-sample.wav",
+      "live_segments": ["Observed live fragment one", "Observed live fragment two"],
+      "evaluation_terms": ["AXA", "Data Scientist", "Heiko Fleming"]
+    }
+  ]
+}
+```
+
+Run only the measurements needed for the baseline, from the repository root:
+
+```bash
+uv run python backend/scripts/run_quality_baseline.py \
+  --fixture /local/path/quality-cases.json \
+  --stt --translation \
+  --translation-timeout-seconds 180
+```
+
+The command constructs the same configured Faster-Whisper and Ollama provider
+adapters as the local Container, but it does not create a Meeting, connect a
+WebSocket, enqueue Assist work, or emit `amcp-throughput` diagnostics. It
+prints the explicitly supplied evaluation text only to the invoking
+developer's terminal. For `--stt`, provide a PCM16 mono 16 kHz WAV. The
+offline loader reproduces the current live profile: complete four-second WAV
+chunks with one second of overlap; it deliberately omits an incomplete trailing
+chunk, matching the live finalized-chunk policy.
+
+The report keeps raw and normalized German text separate, reports word error
+rate plus substitutions/deletions/insertions, and shows explicitly supplied
+evaluation vocabulary. Translation is measured independently using correct
+German reference text, end-to-end from STT output, current/live fragments, and
+bounded coherent German sentence groups. The offline command prints fixed-label
+per-unit progress and records timeouts/failures without raw provider details;
+one failed unit does not discard completed independent units. Its default
+developer-only per-unit Ollama timeout is 180 seconds and is implemented by a
+separate offline client, so it never changes the production setting. The
+optional `--include-whole-passage` flag runs a separate one-request experiment;
+it is intentionally not part of the normal clean-input baseline. Structural
+categories (`source_copy`,
+`non_turkish_script`, `markup_leak`, `special_token_leak`, `empty`, and
+`unexpected_language`) identify obvious invalid output only; they are not a
+semantic Turkish-quality score and do not filter production results.
+
+### Offline Translation Prompt Experiments
+
+For a private fixture that also contains a `translation_benchmark.units` array
+of manually aligned German/Turkish units, compare the current prompt with
+offline-only candidate prompts using the already configured local Ollama model:
+
+```bash
+uv run python backend/scripts/run_translation_quality_experiments.py \
+  --fixture /local/path/quality-cases.json \
+  --translation-timeout-seconds 180 \
+  --report /local/path/translation-experiment-report.txt
+```
+
+The benchmark runner never changes production prompts, model selection,
+generation settings, provider timeout settings, or Assist behaviour. It runs
+four bounded baseline variants: the current structured prompt, a stricter
+structured prompt, a stricter structured prompt with explicitly required terms,
+and a plain-text control. Quality F adds two separately selected offline
+structured variants: `mandatory_preservation_structured` applies a generic
+character-for-character preservation rule, while
+`checklist_preservation_structured` supplies only benchmark terms present in
+the current source unit. The report additionally shows a derived
+MUST-PRESERVE subset metric for names, organisations, locations, and fixed
+technical labels; the original all-terms metric remains unchanged for
+comparability. Progress contains fixed variant/unit labels only; the
+optional report contains the deliberately supplied benchmark text for human
+comparison. `structurally_valid` means only that the output passed objective
+format/script/source-copy checks. `semantically_acceptable` is intentionally
+not inferred: every output remains `not_reviewed` until a human evaluates it
+against the aligned Turkish reference.
+
+### Offline Deterministic Terminology Protection
+
+Quality G evaluates terminology protection independently of the live
+translation provider. It replaces only the existing Quality F MUST-PRESERVE
+benchmark terms present in a source unit with unique opaque
+`__AMCP_TERM_###__` placeholders before the local Aya request. A result is
+restored only when every expected placeholder appears exactly once and no
+unknown or modified placeholder is present; otherwise it fails closed without
+guessing a term. This is deliberately an offline measurement, not production
+post-processing.
+
+```bash
+uv run python backend/scripts/run_terminology_protection_experiment.py \
+  --fixture /local/path/quality-cases.json \
+  --translation-timeout-seconds 180 \
+  --report /local/path/terminology-protection-report.txt
+```
+
 ### Priority-scheduler D validation
 
 After the translation priority scheduler is enabled, run a D comparison under
@@ -820,6 +928,98 @@ intentionally unavailable. Normal CI does not run this permission-dependent
 manual flow.
 
 ---
+
+# Offline Quality I M2M100 Benchmark
+
+Quality I is a developer-only German-to-Turkish benchmark for the approved
+`facebook/m2m100_418M` dedicated MT candidate. It is not part of the live
+Assist pipeline and must use an explicitly supplied private fixture and model
+directories outside the repository.
+
+Prepare the pinned public snapshot and CTranslate2 int8 artifact:
+
+```bash
+uv run python backend/scripts/prepare_m2m100_ct2.py \
+  --model-directory /private/tmp/amcp-quality-i/m2m100-source \
+  --ct2-directory /private/tmp/amcp-quality-i/m2m100-ct2
+```
+
+Then run the private 20-unit sentence/context benchmark and its separate
+live-style fragment section:
+
+```bash
+uv run python backend/scripts/run_m2m100_quality_benchmark.py \
+  --fixture /private/tmp/amcp-quality-a-edeka-interview.json \
+  --model-directory /private/tmp/amcp-quality-i/m2m100-source \
+  --ct2-directory /private/tmp/amcp-quality-i/m2m100-ct2 \
+  --report /private/tmp/amcp-quality-i-report.txt
+```
+
+The result is intentionally a private developer report: it contains supplied
+source/reference/output text for manual semantic review. Normal tests use only
+synthetic fixtures; they never download M2M100, load CTranslate2 model weights,
+or require an Ollama/Faster-Whisper service. The baseline is CPU int8 with
+deterministic `beam_size=1`; it performs no prompt tuning, glossary handling,
+or production configuration changes.
+
+---
+
+# Offline Quality J Sentence-aware Translation Feasibility
+
+Quality J replays only the private fixture's existing `live_segments` through
+the already installed `aya-expanse:8b` model. It compares current
+single-segment requests, deterministic sentence-boundary batching, and a
+literal two-consecutive-segment context policy without importing any code into
+the live Assist, scheduler, or WebSocket paths.
+
+```bash
+uv run python backend/scripts/run_sentence_aware_translation_feasibility.py \
+  --fixture /private/tmp/amcp-quality-a-edeka-interview.json \
+  --report /private/tmp/amcp-quality-j-report.txt \
+  --translation-timeout-seconds 180 \
+  --segment-cadence-ms 3000
+```
+
+The cadence is an offline replay parameter only. The report includes model
+inference timing and first-segment-visible latency, which adds the time spent
+waiting for a batch to become eligible. Its STT-priority admission count is an
+optimistic upper bound: continuous live STT can still defer or preempt an Aya
+request. The report remains in private temporary storage because it contains
+developer-supplied transcript and translation text.
+
+---
+
+# Offline Quality K STT-to-Translation Attribution
+
+Quality K compares the same defensibly aligned speech unit in two forms:
+unchanged human-reference German and unchanged live-STT German. It uses the
+same offline Aya preservation-structured configuration as Quality E and never
+imports into live STT, Assist, scheduling, or production telemetry.
+
+Create the alignment manifest and report outside the repository because they
+may identify private transcript segments. Each pair explicitly names the
+private fixture's reference-unit IDs and live-segment IDs. A repair, when
+present, is one exact evaluation-only substitution for a controlled
+counterfactual; it is never production terminology correction.
+
+```bash
+uv run python backend/scripts/run_stt_translation_attribution.py \
+  --fixture /local/path/quality-cases.json \
+  --alignment /local/path/quality-k-alignment.json \
+  --report /local/path/quality-k-report.txt \
+  --translation-timeout-seconds 180
+```
+
+The private report includes deliberately supplied reference German/Turkish,
+actual STT German, both Aya outputs, and optional single-error repair output
+for manual attribution as `translation_only`, `stt_propagated`, `amplified`,
+`robust`, or `inconclusive`. The tool makes no automatic semantic-quality
+claim, does not rewrite live STT before its primary translation, has bounded
+sequential requests, and emits only fixed phase/index progress to the normal
+terminal.
+
+---
+
 # Offline Quality L Faster-Whisper Prompt and Context Replay
 
 Quality L is a private, offline comparison of the current live STT profile
@@ -907,5 +1107,45 @@ includes warm latency/RTF percentiles and tail counts. It must be compared to
 an existing C control produced from the same private recording. This command
 can cause Faster-Whisper to download a model if the named artifact is absent;
 verify the local cache and obtain approval before using a new model name.
+
+---
+
+# Offline Quality O Timestamp-Aligned Gold STT Evaluation
+
+Quality O is a developer-only foundation for private, human-verified German
+gold references. It is deliberately separate from live STT and from full
+four-second/one-second-overlap pipeline replay: only verified,
+evaluation-eligible gold intervals contribute to its absolute WER/CER.
+
+Store the real audio, gold reference JSONL, model-prediction JSONL, and reports
+outside Git. Gold and prediction records are strictly separate:
+
+```text
+private/gold.jsonl + private/predictions.jsonl -> local Quality O report
+```
+
+Each gold JSONL record has an opaque `audio_id`, interval `[start_ms, end_ms)`,
+human German text, a review state, eligibility flag, tags, explicit term and
+number annotations, and bounded review metadata. There is no audio path in the
+schema. Prediction JSONL records contain only an opaque audio/segment identity,
+run/model labels, and German hypothesis text; they cannot contain gold text.
+
+Primary metrics include only `reference_state="verified"` and
+`evaluation_eligible=true` intervals. `uncertain`, `unintelligible`,
+`partial_word`, and `interrupted` intervals remain documented but excluded from
+absolute WER/CER. NFC normalization, case folding, whitespace/punctuation
+handling, and tokenization are deterministic and model-independent; no number
+word conversion, technical-term correction, or known-model-confusion repair is
+applied to general WER.
+
+Technical terms and numbers are scored only when explicit gold annotations
+identify their occurrence. Numeric value equivalents are annotation supplied;
+technical identifiers such as `BM25` are never inferred to be the standalone
+number `25`. The Phase 1 foundation has no translation-impact evaluation and
+does not run models, replay audio, or change live STT behavior.
+
+Normal tests use synthetic JSONL only. Never commit private interview audio,
+transcripts, gold records, predictions, alignment manifests, reviewer notes, or
+reports containing supplied text.
 
 ---
