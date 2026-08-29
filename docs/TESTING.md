@@ -820,3 +820,92 @@ intentionally unavailable. Normal CI does not run this permission-dependent
 manual flow.
 
 ---
+# Offline Quality L Faster-Whisper Prompt and Context Replay
+
+Quality L is a private, offline comparison of the current live STT profile
+against three bounded alternatives: a short technical-vocabulary
+`initial_prompt`, the immediately preceding accepted chunk as bounded context,
+and their combination. It does not change the live provider configuration,
+model, chunk size, deduplicator, scheduling, or telemetry.
+
+Supply an explicit private PCM16 mono 16 kHz WAV and write the resulting report
+outside the repository:
+
+```bash
+uv run python backend/scripts/run_stt_quality_experiments.py \
+  --fixture /local/path/quality-cases.json \
+  --case-id local-case-id \
+  --audio /local/path/private-recording.wav \
+  --report /local/path/quality-l-report.txt
+```
+
+The baseline sends exactly the current adapter arguments: configured
+`beam_size`, configured `vad_filter`, and `language="de"`; it deliberately
+leaves Faster-Whisper's `condition_on_previous_text` at the provider default.
+All variants replay the same completed four-second WAV chunks at the current
+one-second overlap and use the existing `TranscriptDeduplicator`. Vocabulary
+is bounded to 480 prompt characters; context is only the previous accepted
+chunk and is bounded to 320 characters. The report includes WER, word edits,
+term/numeric-token presence, per-chunk and aggregate latency/RTF, and raw
+developer-supplied output for manual hallucination/repetition review.
+
+Quality L does not infer semantic translation quality or automatically align a
+new STT run to Quality K pairs. Any downstream Aya comparison must use an
+explicit new private alignment manifest after a human verifies that the new
+chunk output represents the same underlying speech.
+
+---
+
+# Offline Quality M Bounded Prompt and Context Comparison
+
+Quality M reuses Quality L's unchanged `previous_context` (C) and broad
+`vocabulary_and_context` (D) controls. It adds only two predefined offline
+conditions: the Quality K failure-derived 13-term critical vocabulary with the
+existing 320-character accepted-context suffix (E), and the identical critical
+vocabulary with a 160-character suffix (F). The values are fixed before a run;
+they are not tuned per recording.
+
+```bash
+uv run python backend/scripts/run_stt_quality_experiments.py \
+  --fixture /local/path/quality-cases.json \
+  --case-id local-case-id \
+  --audio /local/path/private-recording.wav \
+  --report /local/path/quality-m-report.txt \
+  --quality-m
+```
+
+The report adds per-chunk prompt/vocabulary/context character counts, chunk RTF
+percentiles, tail-latency counts at 4/8/15/30 seconds, and deduplication totals.
+It remains private developer output; no result is used to modify the live STT
+configuration.
+
+---
+
+# Offline Quality N Faster-Whisper Capacity Replay
+
+Quality N isolates model capacity from all Quality L/M prompt changes. It runs
+only the unchanged context-only C condition: four-second PCM16 mono 16 kHz
+chunks, one-second overlap, forced German, configured beam size and VAD state,
+the current `TranscriptDeduplicator`, no vocabulary prompt, and the
+320-character previous accepted-context suffix. The selected model is supplied
+only through the process environment; it does not alter the persisted or live
+application configuration.
+
+```bash
+AI_MEETING_COPILOT_FASTER_WHISPER_MODEL=medium \
+uv run python backend/scripts/run_stt_quality_experiments.py \
+  --fixture /local/path/quality-cases.json \
+  --case-id local-case-id \
+  --audio /local/path/private-recording.wav \
+  --report /local/path/quality-n-medium-report.txt \
+  --quality-n
+```
+
+The private report separates model-load time and first-chunk latency from warm
+chunks, records the process RSS high-water mark after model loading, and
+includes warm latency/RTF percentiles and tail counts. It must be compared to
+an existing C control produced from the same private recording. This command
+can cause Faster-Whisper to download a model if the named artifact is absent;
+verify the local cache and obtain approval before using a new model name.
+
+---
