@@ -1118,10 +1118,15 @@ four-second/one-second-overlap pipeline replay: only verified,
 evaluation-eligible gold intervals contribute to its absolute WER/CER.
 
 Store the real audio, gold reference JSONL, model-prediction JSONL, and reports
-outside Git. Gold and prediction records are strictly separate:
+inside one protected local `quality-private/` workspace. A repository-local
+`/quality-private/` directory is ignored by Git; an external workspace must
+also be named `quality-private/`. Gold and prediction records are strictly
+separate:
 
 ```text
-private/gold.jsonl + private/predictions.jsonl -> local Quality O report
+quality-private/gold/gold.jsonl
+  + quality-private/predictions/<run>.jsonl
+  -> quality-private/reports/<run>-baseline.json
 ```
 
 Each gold JSONL record has an opaque `audio_id`, interval `[start_ms, end_ms)`,
@@ -1147,5 +1152,49 @@ does not run models, replay audio, or change live STT behavior.
 Normal tests use synthetic JSONL only. Never commit private interview audio,
 transcripts, gold records, predictions, alignment manifests, reviewer notes, or
 reports containing supplied text.
+
+## Private Gold Baseline Workflow
+
+Create the private directory tree locally, outside version control or at the
+repository-root ignored location. Do not put real content in this document.
+
+```text
+quality-private/
+  audio/          # local source audio; not consumed by the evaluator
+  gold/           # human-reviewed gold.jsonl
+  predictions/    # one explicit prediction JSONL per STT run
+  reports/        # deterministic metric-only baseline reports
+```
+
+Gold records are a human-reviewed reference: use opaque audio and segment IDs,
+half-open `[start_ms, end_ms)` intervals, German reference text, a review state,
+eligibility flag, optional speaker/tags, explicit term and number annotations,
+and bounded review metadata. Never automatically promote a machine transcript to
+`verified` gold. Prediction records are a separate model-output contract with
+only opaque identifiers, a run/model label, and `hypothesis_de`.
+
+The baseline runner validates both JSONL files before calculating metrics. It
+does not read audio, invoke Faster-Whisper, or import the live STT pipeline. It
+rejects private input/output paths unless they share the same protected
+`quality-private/` workspace, and it refuses to overwrite an existing report
+without explicit confirmation.
+
+```bash
+uv run python backend/scripts/run_gold_stt_baseline.py \
+  --gold /local/path/quality-private/gold/gold.jsonl \
+  --predictions /local/path/quality-private/predictions/small-c.jsonl \
+  --output /local/path/quality-private/reports/small-c-baseline.json
+```
+
+Use `--overwrite` only to intentionally replace the named local report. The
+canonical JSON report contains opaque IDs, run/model identification, eligible
+segment and duration totals, WER/CER error counts, aggregate technical-term and
+number metrics, and per-segment metric counts. It intentionally excludes raw
+gold and hypothesis text, volatile generation timestamps, and audio paths.
+
+For a candidate comparison, freeze `gold.jsonl` and create a new prediction
+file with a distinct `run_id`/`model_label`; run the same command to a separate
+report path. Compare those deterministic reports, not private text copied into
+source control.
 
 ---

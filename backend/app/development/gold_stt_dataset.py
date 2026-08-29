@@ -561,12 +561,28 @@ def _evaluate_terms(
     segment: GoldSttSegment,
     hypothesis_text: str,
 ) -> tuple[TermOccurrenceMetrics, ...]:
-    hypothesis_tokens = normalize_german_tokens(hypothesis_text)
+    normalized_hypothesis, hypothesis_token_spans = _normalized_token_spans(
+        hypothesis_text
+    )
+    hypothesis_tokens = tuple(item[0] for item in hypothesis_token_spans)
+    consumed_token_indices: set[int] = set()
     occurrences: list[TermOccurrenceMetrics] = []
     for term in segment.terms:
         expected_tokens = normalize_german_tokens(term.surface)
-        exact_match = _raw_phrase_present(term.surface, hypothesis_text)
-        normalized_match = _phrase_tokens_present(expected_tokens, hypothesis_tokens)
+        matched_span = _find_first_phrase_span(
+            hypothesis_tokens,
+            expected_tokens,
+            excluded_indices=consumed_token_indices,
+        )
+        if matched_span is not None:
+            consumed_token_indices.update(range(matched_span[0], matched_span[1]))
+        normalized_match = matched_span is not None
+        exact_match = normalized_match and _selected_span_is_exact(
+            phrase=term.surface,
+            normalized_text=normalized_hypothesis,
+            token_spans=hypothesis_token_spans,
+            matched_span=matched_span,
+        )
         occurrences.append(
             TermOccurrenceMetrics(
                 segment_id=segment.segment_id,
@@ -588,11 +604,13 @@ def _evaluate_numbers(
     segment: GoldSttSegment,
     hypothesis_text: str,
 ) -> tuple[tuple[NumberOccurrenceMetrics, ...], int]:
-    hypothesis_tokens = normalize_german_tokens(hypothesis_text)
+    normalized_hypothesis, hypothesis_token_spans = _normalized_token_spans(
+        hypothesis_text
+    )
+    hypothesis_tokens = tuple(item[0] for item in hypothesis_token_spans)
     consumed_token_indices: set[int] = set()
     occurrences: list[NumberOccurrenceMetrics] = []
     for number in segment.numbers:
-        surface_match = _raw_phrase_present(number.surface, hypothesis_text)
         matched_span = _find_first_phrase_span(
             hypothesis_tokens,
             normalize_german_tokens(number.surface),
@@ -610,6 +628,12 @@ def _evaluate_numbers(
                     break
         if value_span is not None:
             consumed_token_indices.update(range(value_span[0], value_span[1]))
+            surface_match = matched_span is not None and _selected_span_is_exact(
+                phrase=number.surface,
+                normalized_text=normalized_hypothesis,
+                token_spans=hypothesis_token_spans,
+                matched_span=matched_span,
+            )
             outcome = (
                 NumberEvaluationOutcome.SURFACE_MATCH
                 if surface_match
@@ -1031,11 +1055,33 @@ def _phrase_tokens_present(phrase: Sequence[str], text: Sequence[str]) -> bool:
     )
 
 
-def _raw_phrase_present(phrase: str, text: str) -> bool:
+def _normalized_token_spans(text: str) -> tuple[str, tuple[tuple[str, int, int], ...]]:
+    """Return NFC text and normalized token spans for occurrence consumption."""
+
+    normalized_text = unicodedata.normalize("NFC", text)
     return (
-        re.search(rf"(?<![^\W_]){re.escape(phrase)}(?![^\W_])", text, flags=re.UNICODE)
-        is not None
+        normalized_text,
+        tuple(
+            (match.group().casefold(), match.start(), match.end())
+            for match in _TOKEN_PATTERN.finditer(normalized_text)
+        ),
     )
+
+
+def _selected_span_is_exact(
+    *,
+    phrase: str,
+    normalized_text: str,
+    token_spans: Sequence[tuple[str, int, int]],
+    matched_span: tuple[int, int] | None,
+) -> bool:
+    """Check raw exactness only for the one consumed normalized occurrence."""
+
+    if matched_span is None:
+        return False
+    start, end = matched_span
+    selected_text = normalized_text[token_spans[start][1] : token_spans[end - 1][2]]
+    return selected_text == unicodedata.normalize("NFC", phrase)
 
 
 def _closest_token_window(

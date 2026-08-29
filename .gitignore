@@ -59,6 +59,9 @@ target/
 pytestdebug.log
 profile/
 
+# Private offline Quality O gold references, predictions, audio, and reports
+/quality-private/
+
 # IDEs and operating systems
 .idea/
 .vscode/

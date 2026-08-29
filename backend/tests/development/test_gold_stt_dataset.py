@@ -266,6 +266,114 @@ def test_terms_report_a_private_confusion_without_changing_gold() -> None:
     assert report.technical_terms.confusions[0].observed == "rack"
 
 
+@pytest.mark.parametrize(
+    ("term_surface", "hypothesis"),
+    [
+        ("RAG", "Rack ist wichtig."),
+        ("BM25", "BME-25 ist ein Verfahren."),
+        ("HyDE", "Height ist ein Verfahren."),
+    ],
+)
+def test_term_confusions_remain_errors(term_surface: str, hypothesis: str) -> None:
+    term = GoldTechnicalTerm(
+        surface=term_surface,
+        canonical=term_surface,
+        category=GoldTermCategory.TECHNICAL_TERM,
+    )
+    gold = GoldSttDataset(
+        audio_id="synthetic-audio-1",
+        segments=(_segment(text_de=f"{term_surface} ist wichtig.", terms=(term,)),),
+    )
+
+    report = evaluate_gold_aligned_stt(
+        gold=gold,
+        predictions=_predictions(("gold-001", hypothesis)),
+    )
+
+    assert report.technical_terms.normalized_match_count == 0
+
+
+def test_repeated_term_annotations_consume_hypothesis_occurrences() -> None:
+    term = GoldTechnicalTerm(
+        surface="RAG", canonical="RAG", category=GoldTermCategory.TECHNICAL_TERM
+    )
+    gold = GoldSttDataset(
+        audio_id="synthetic-audio-1",
+        segments=(_segment(text_de="RAG und später RAG.", terms=(term, term)),),
+    )
+
+    one_observed = evaluate_gold_aligned_stt(
+        gold=gold,
+        predictions=_predictions(("gold-001", "Wir verwenden RAG.")),
+    )
+    two_observed = evaluate_gold_aligned_stt(
+        gold=gold,
+        predictions=_predictions(
+            ("gold-001", "RAG wird verwendet und später erneut RAG.")
+        ),
+    )
+
+    assert one_observed.technical_terms.occurrence_count == 2
+    assert one_observed.technical_terms.normalized_match_count == 1
+    assert two_observed.technical_terms.normalized_match_count == 2
+
+
+def test_mixed_repeated_terms_do_not_cross_consume_occurrences() -> None:
+    rag = GoldTechnicalTerm(
+        surface="RAG", canonical="RAG", category=GoldTermCategory.TECHNICAL_TERM
+    )
+    bm25 = GoldTechnicalTerm(
+        surface="BM25", canonical="BM25", category=GoldTermCategory.TECHNICAL_TERM
+    )
+    gold = GoldSttDataset(
+        audio_id="synthetic-audio-1",
+        segments=(_segment(text_de="RAG BM25 RAG", terms=(rag, bm25, rag)),),
+    )
+
+    report = evaluate_gold_aligned_stt(
+        gold=gold,
+        predictions=_predictions(("gold-001", "RAG und BM25")),
+    )
+
+    assert [item.normalized_match for item in report.technical_terms.occurrences] == [
+        True,
+        True,
+        False,
+    ]
+
+
+def test_unicode_and_hyphenated_terms_normalize_without_model_corrections() -> None:
+    location = GoldTechnicalTerm(
+        surface="Mörfelden-Walldorf",
+        canonical="Mörfelden-Walldorf",
+        category=GoldTermCategory.LOCATION,
+    )
+    reranking = GoldTechnicalTerm(
+        surface="Re-Ranking",
+        canonical="Re-Ranking",
+        category=GoldTermCategory.TECHNICAL_TERM,
+    )
+    gold = GoldSttDataset(
+        audio_id="synthetic-audio-1",
+        segments=(
+            _segment(
+                text_de="Mörfelden-Walldorf nutzt Re-Ranking.",
+                terms=(location, reranking),
+            ),
+        ),
+    )
+
+    report = evaluate_gold_aligned_stt(
+        gold=gold,
+        predictions=_predictions(
+            ("gold-001", "Mo\u0308rfelden-Walldorf nutzt re-ranking.")
+        ),
+    )
+
+    assert report.technical_terms.normalized_match_count == 2
+    assert report.technical_terms.exact_match_count == 1
+
+
 def test_numbers_distinguish_surface_and_annotation_defined_value_forms() -> None:
     number = GoldNumber(
         surface="fünfundzwanzig",
@@ -286,6 +394,53 @@ def test_numbers_distinguish_surface_and_annotation_defined_value_forms() -> Non
     assert occurrence.value_match is True
     assert occurrence.outcome is NumberEvaluationOutcome.VALUE_MATCH
     assert report.numbers.insertions == 0
+
+
+def test_repeated_number_annotations_consume_surface_occurrences() -> None:
+    number = GoldNumber(
+        surface="neun",
+        canonical_value="9",
+        kind=GoldNumberKind.CARDINAL,
+    )
+    gold = GoldSttDataset(
+        audio_id="synthetic-audio-1",
+        segments=(_segment(text_de="neun und neun Jahre", numbers=(number, number)),),
+    )
+
+    one_observed = evaluate_gold_aligned_stt(
+        gold=gold,
+        predictions=_predictions(("gold-001", "seit neun Jahren")),
+    )
+    two_observed = evaluate_gold_aligned_stt(
+        gold=gold,
+        predictions=_predictions(("gold-001", "seit neun und neun Jahren")),
+    )
+
+    assert one_observed.numbers.surface_match_count == 1
+    assert one_observed.numbers.value_match_count == 1
+    assert one_observed.numbers.deletions == 1
+    assert two_observed.numbers.surface_match_count == 2
+    assert two_observed.numbers.value_match_count == 2
+
+
+def test_number_value_equivalence_remains_annotation_defined() -> None:
+    number = GoldNumber(
+        surface="neun",
+        canonical_value="9",
+        kind=GoldNumberKind.CARDINAL,
+    )
+    gold = GoldSttDataset(
+        audio_id="synthetic-audio-1",
+        segments=(_segment(text_de="neun Jahre", numbers=(number,)),),
+    )
+
+    report = evaluate_gold_aligned_stt(
+        gold=gold,
+        predictions=_predictions(("gold-001", "9 Jahre")),
+    )
+
+    assert report.numbers.surface_match_count == 0
+    assert report.numbers.value_match_count == 1
 
 
 def test_bm25_is_only_a_technical_term_not_a_standalone_number() -> None:
@@ -343,6 +498,119 @@ def test_predictions_must_cover_all_eligible_gold_segments() -> None:
             gold=gold,
             predictions=_predictions(("gold-001", "RAG ist wichtig.")),
         )
+
+
+def test_predictions_reject_unknown_segment_ids_and_audio_mismatches() -> None:
+    gold = GoldSttDataset(
+        audio_id="synthetic-audio-1",
+        segments=(_segment(),),
+    )
+    unknown = _predictions(("unknown-001", "RAG ist wichtig."))
+    mismatched_audio = SttPredictionDataset(
+        audio_id="synthetic-audio-2",
+        run_id="synthetic-run-1",
+        model_label="synthetic-model",
+        predictions=(
+            SttPrediction(
+                schema_version=1,
+                audio_id="synthetic-audio-2",
+                segment_id="gold-001",
+                run_id="synthetic-run-1",
+                model_label="synthetic-model",
+                hypothesis_de="RAG ist wichtig.",
+            ),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="unknown gold"):
+        evaluate_gold_aligned_stt(gold=gold, predictions=unknown)
+    with pytest.raises(ValueError, match="audio IDs must match"):
+        evaluate_gold_aligned_stt(gold=gold, predictions=mismatched_audio)
+
+
+def test_prediction_dataset_rejects_duplicate_segment_ids() -> None:
+    prediction = SttPrediction(
+        schema_version=1,
+        audio_id="synthetic-audio-1",
+        segment_id="gold-001",
+        run_id="synthetic-run-1",
+        model_label="synthetic-model",
+        hypothesis_de="RAG ist wichtig.",
+    )
+
+    with pytest.raises(ValueError, match="segment IDs must be unique"):
+        SttPredictionDataset(
+            audio_id="synthetic-audio-1",
+            run_id="synthetic-run-1",
+            model_label="synthetic-model",
+            predictions=(prediction, prediction),
+        )
+
+
+def test_prediction_order_does_not_change_evaluation_metrics() -> None:
+    gold = GoldSttDataset(
+        audio_id="synthetic-audio-1",
+        segments=(
+            _segment(segment_id="gold-001", text_de="eins zwei"),
+            _segment(
+                segment_id="gold-002",
+                start_ms=1_000,
+                end_ms=2_000,
+                text_de="drei vier",
+            ),
+        ),
+    )
+    ordered = _predictions(("gold-001", "eins zwei"), ("gold-002", "drei"))
+    reversed_predictions = _predictions(("gold-002", "drei"), ("gold-001", "eins zwei"))
+
+    assert (
+        evaluate_gold_aligned_stt(gold=gold, predictions=ordered).word_errors
+        == evaluate_gold_aligned_stt(
+            gold=gold, predictions=reversed_predictions
+        ).word_errors
+    )
+
+
+def test_aggregate_wer_uses_summed_counts_not_segment_averages() -> None:
+    gold = GoldSttDataset(
+        audio_id="synthetic-audio-1",
+        segments=(
+            _segment(segment_id="gold-001", text_de="eins"),
+            _segment(
+                segment_id="gold-002",
+                start_ms=1_000,
+                end_ms=2_000,
+                text_de="zwei drei vier fünf sechs sieben acht neun zehn elf",
+            ),
+        ),
+    )
+
+    report = evaluate_gold_aligned_stt(
+        gold=gold,
+        predictions=_predictions(
+            ("gold-001", "falsch"),
+            ("gold-002", "zwei drei vier fünf sechs sieben acht neun zehn falsch"),
+        ),
+    )
+
+    assert report.word_errors.error_rate == pytest.approx(2 / 11)
+    assert report.per_segment[0].word_errors.error_rate == 1.0
+    assert report.per_segment[1].word_errors.error_rate == pytest.approx(1 / 10)
+
+
+def test_empty_hypothesis_is_counted_as_deletions() -> None:
+    gold = GoldSttDataset(
+        audio_id="synthetic-audio-1",
+        segments=(_segment(text_de="eins zwei drei"),),
+    )
+
+    report = evaluate_gold_aligned_stt(
+        gold=gold,
+        predictions=_predictions(("gold-001", "")),
+    )
+
+    assert report.word_errors.deletions == 3
+    assert report.word_errors.error_rate == 1.0
 
 
 def test_verified_normalized_text_must_equal_the_derived_evaluation_form() -> None:
