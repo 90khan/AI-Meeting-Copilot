@@ -40,6 +40,12 @@ impl ManagedAudioCaptureCoordinator {
     pub(crate) async fn stop(&self) {
         let _ = self.coordinator.lock().await.stop().await;
     }
+
+    /// Application exit is cancellation, not a user-requested transcription
+    /// completion. Keep it bounded and do not emit a final live-STT tail.
+    pub(crate) async fn abort(&self) {
+        self.coordinator.lock().await.abort().await;
+    }
 }
 
 const GENERIC_UNAVAILABLE: &str = "Audio capture is unavailable.";

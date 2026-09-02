@@ -85,7 +85,7 @@ pub fn run() {
                 .clone();
             tauri::async_runtime::block_on(playback.stop());
             let capture = app_handle.state::<ManagedAudioCaptureCoordinator>().inner();
-            tauri::async_runtime::block_on(capture.stop());
+            tauri::async_runtime::block_on(capture.abort());
             let live_transcription_client = app_handle
                 .state::<LiveTranscriptionClient>()
                 .inner()

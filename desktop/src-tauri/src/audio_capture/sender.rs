@@ -28,6 +28,10 @@ use crate::live_transcription::client::{
 /// retaining an unbounded amount of audio in memory.
 pub(crate) const FINALIZED_CHUNK_QUEUE_CAPACITY: usize = 7;
 
+/// Graceful capture completion may wait for normal sequential STT submission,
+/// but it must never wait indefinitely during a user-facing stop.
+pub(crate) const GRACEFUL_SENDER_DRAIN_TIMEOUT: Duration = Duration::from_secs(20);
+
 /// A finalized chunk becomes eligible for submission at this instant. The
 /// timestamp is private process-local observability data: it is never sent to
 /// the backend or exposed through Tauri.
@@ -177,7 +181,7 @@ impl FinalizedChunkQueue {
     }
 
     #[cfg(test)]
-    fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.chunks
             .lock()
             .expect("finalized chunk queue lock")
@@ -191,6 +195,15 @@ impl FinalizedChunkQueue {
 pub(crate) enum FinalizedChunkQueueError {
     Closed,
     Full,
+}
+
+/// A bounded graceful-drain result. Details remain inside the capture layer;
+/// the command boundary continues to expose only its generic safe failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChunkSenderFinishError {
+    TimedOut,
+    SubmissionFailed,
+    TaskFailed,
 }
 
 /// One task owns all awaits on the live-transcription submission boundary.
@@ -280,9 +293,31 @@ impl ChunkSenderTask {
         )
     }
 
-    /// Give an in-flight submission a short chance to finish before cancelling
-    /// the task. No queued audio is drained after stop begins.
-    pub(crate) async fn stop(self) {
+    /// Closes admission and drains all already-admitted chunks in FIFO order.
+    /// The in-flight submission is included in the same bounded timeout.
+    pub(crate) async fn finish_gracefully(
+        self,
+        drain_timeout: Duration,
+    ) -> Result<(), ChunkSenderFinishError> {
+        self.queue.close();
+        let mut handle = self.handle;
+        match timeout(drain_timeout, &mut handle).await {
+            Ok(Ok(())) if self.failed.load(Ordering::Acquire) => {
+                Err(ChunkSenderFinishError::SubmissionFailed)
+            }
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(_)) => Err(ChunkSenderFinishError::TaskFailed),
+            Err(_) => {
+                handle.abort();
+                let _ = handle.await;
+                Err(ChunkSenderFinishError::TimedOut)
+            }
+        }
+    }
+
+    /// Immediately discards pending audio for cancellation, app exit, and
+    /// terminal failure paths. It must not be used for normal user stop.
+    pub(crate) async fn abort(self) {
         self.stopped.store(true, Ordering::Release);
         self.queue.close();
         self.queue.clear();
@@ -325,8 +360,8 @@ mod tests {
     };
 
     use super::{
-        ChunkSenderTask, ChunkSubmitter, FinalizedChunkQueue, FinalizedChunkQueueError,
-        FINALIZED_CHUNK_QUEUE_CAPACITY,
+        ChunkSenderFinishError, ChunkSenderTask, ChunkSubmitter, FinalizedChunkQueue,
+        FinalizedChunkQueueError, FINALIZED_CHUNK_QUEUE_CAPACITY,
     };
     use crate::{
         audio_capture::wav::EncodedAudioChunk,
@@ -487,7 +522,7 @@ mod tests {
             *submitted.lock().expect("recording submitter lock"),
             vec![(3, 0), (4, 0)]
         );
-        sender_task.stop().await;
+        sender_task.abort().await;
     }
 
     #[tokio::test]
@@ -526,7 +561,7 @@ mod tests {
             ]
         );
         assert!(!sender_task.failed());
-        sender_task.stop().await;
+        sender_task.abort().await;
     }
 
     #[tokio::test]
@@ -547,6 +582,52 @@ mod tests {
         .await
         .expect("failure is observed");
         assert_eq!(queue.len(), 0);
-        sender_task.stop().await;
+        sender_task.abort().await;
+    }
+
+    #[tokio::test]
+    async fn graceful_finish_closes_admission_and_drains_fifo_including_in_flight_work() {
+        let submitted = Arc::new(Mutex::new(Vec::new()));
+        let permits = Arc::new(Semaphore::new(0));
+        let (sender_task, queue) = ChunkSenderTask::start(Arc::new(GatedSubmitter {
+            submitted: Arc::clone(&submitted),
+            permits: Arc::clone(&permits),
+        }));
+        assert_eq!(queue.push(chunk(0)), Ok(()));
+        wait_for_submission(&submitted, 1).await;
+        assert_eq!(queue.push(chunk(1)), Ok(()));
+        assert_eq!(queue.push(chunk(2)), Ok(()));
+
+        queue.close();
+        let finish =
+            tokio::spawn(
+                async move { sender_task.finish_gracefully(Duration::from_secs(1)).await },
+            );
+        assert_eq!(queue.push(chunk(3)), Err(FinalizedChunkQueueError::Closed));
+        permits.add_permits(3);
+        assert_eq!(finish.await.expect("finish task"), Ok(()));
+        assert_eq!(
+            *submitted.lock().expect("submitted lock"),
+            vec![(0, 0), (1, 1), (2, 0)]
+        );
+    }
+
+    #[tokio::test]
+    async fn graceful_finish_is_bounded_when_an_in_flight_submission_never_completes() {
+        let submitted = Arc::new(Mutex::new(Vec::new()));
+        let permits = Arc::new(Semaphore::new(0));
+        let (sender_task, queue) = ChunkSenderTask::start(Arc::new(GatedSubmitter {
+            submitted: Arc::clone(&submitted),
+            permits,
+        }));
+        assert_eq!(queue.push(chunk(0)), Ok(()));
+        wait_for_submission(&submitted, 1).await;
+
+        assert_eq!(
+            sender_task
+                .finish_gracefully(Duration::from_millis(5))
+                .await,
+            Err(ChunkSenderFinishError::TimedOut)
+        );
     }
 }

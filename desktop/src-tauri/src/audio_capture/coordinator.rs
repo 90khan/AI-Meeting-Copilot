@@ -1,12 +1,12 @@
 //! Lifecycle holder for native capture, DSP, chunk encoding, and submission.
 
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
+use std::{
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
+    time::Instant,
 };
-
-#[cfg(debug_assertions)]
-use std::time::Instant;
 
 use thiserror::Error;
 use tokio::{
@@ -24,7 +24,10 @@ use super::{
     recording_writer::{EncodedRecordingSegment, RecordingFailureCode, RecordingSegmentWriter},
     reorder::{NativeFrameReorderBuffer, OrderedNativeFrame},
     resampler::AudioProcessingError,
-    sender::{ChunkSenderTask, ChunkSubmitter, FinalizedChunkQueue, FinalizedChunkQueueError},
+    sender::{
+        ChunkSenderTask, ChunkSubmitter, FinalizedChunkQueue, FinalizedChunkQueueError,
+        GRACEFUL_SENDER_DRAIN_TIMEOUT,
+    },
     status::{AudioCaptureState, AudioCaptureStatus},
     types::{AudioCaptureConfiguration, NativeAudioFrame},
     wav::{build_wav_from_samples, encode_audio_chunk},
@@ -267,7 +270,9 @@ pub(crate) struct AudioCaptureCoordinator<B: NativeAudioCaptureBridge> {
     pipeline: Arc<Mutex<ProcessingPipeline>>,
     processing_task: Option<JoinHandle<()>>,
     processing_failed: Arc<AtomicBool>,
+    final_tail_admission_failed: Arc<AtomicBool>,
     stopping: Arc<AtomicBool>,
+    graceful_stopping: Arc<AtomicBool>,
     finalized_queue: Option<Arc<FinalizedChunkQueue>>,
     sender_task: Option<ChunkSenderTask>,
     state: AudioCaptureState,
@@ -280,7 +285,9 @@ impl<B: NativeAudioCaptureBridge> AudioCaptureCoordinator<B> {
             pipeline: Arc::new(Mutex::new(ProcessingPipeline::default())),
             processing_task: None,
             processing_failed: Arc::new(AtomicBool::new(false)),
+            final_tail_admission_failed: Arc::new(AtomicBool::new(false)),
             stopping: Arc::new(AtomicBool::new(false)),
+            graceful_stopping: Arc::new(AtomicBool::new(false)),
             finalized_queue: None,
             sender_task: None,
             state: AudioCaptureState::Stopped,
@@ -322,7 +329,10 @@ impl<B: NativeAudioCaptureBridge> AudioCaptureCoordinator<B> {
 
         self.state = AudioCaptureState::Starting;
         self.processing_failed.store(false, Ordering::Release);
+        self.final_tail_admission_failed
+            .store(false, Ordering::Release);
         self.stopping.store(false, Ordering::Release);
+        self.graceful_stopping.store(false, Ordering::Release);
         {
             let mut pipeline = self.pipeline.lock().expect("processing pipeline lock");
             pipeline.reset();
@@ -350,7 +360,9 @@ impl<B: NativeAudioCaptureBridge> AudioCaptureCoordinator<B> {
             Arc::clone(&self.pipeline),
             Arc::clone(&finalized_queue),
             Arc::clone(&self.processing_failed),
+            Arc::clone(&self.final_tail_admission_failed),
             Arc::clone(&self.stopping),
+            Arc::clone(&self.graceful_stopping),
             sender_failed,
             sender_failure_notify,
             worker_ready_sender,
@@ -364,7 +376,7 @@ impl<B: NativeAudioCaptureBridge> AudioCaptureCoordinator<B> {
             eprintln!("audio-capture processing worker aborted reason=readiness_failed");
             processing_task.abort();
             let _ = processing_task.await;
-            sender_task.stop().await;
+            sender_task.abort().await;
             self.state = AudioCaptureState::Failed;
             return Err(AudioCaptureCoordinatorError::StartFailed);
         }
@@ -376,7 +388,7 @@ impl<B: NativeAudioCaptureBridge> AudioCaptureCoordinator<B> {
             eprintln!("audio-capture processing worker aborted reason=native_start_failed");
             processing_task.abort();
             let _ = processing_task.await;
-            sender_task.stop().await;
+            sender_task.abort().await;
             self.state = AudioCaptureState::Failed;
             return Err(AudioCaptureCoordinatorError::StartFailed);
         }
@@ -394,53 +406,119 @@ impl<B: NativeAudioCaptureBridge> AudioCaptureCoordinator<B> {
         self.status()
     }
 
-    /// Stops native capture, joins the sender task, and discards queued WAV data.
+    /// Gracefully completes normal user stop: native input drains into the
+    /// existing FIFO, an eligible final live-STT tail is admitted once, and
+    /// the FIFO drains under one bounded deadline.
     pub(crate) async fn stop(
         &mut self,
     ) -> Result<AudioCaptureStatus, AudioCaptureCoordinatorError> {
         if self.state == AudioCaptureState::Stopped && self.sender_task.is_none() {
             return self.status();
         }
+        if self.state == AudioCaptureState::Failed {
+            self.abort().await;
+            return self.status();
+        }
 
         self.state = AudioCaptureState::Stopping;
         self.stopping.store(true, Ordering::Release);
+        self.graceful_stopping.store(true, Ordering::Release);
+        let graceful_stop_started_at = Instant::now();
         let native_stop = self.bridge.stop();
+        if native_stop.is_err() {
+            self.abort_processing_and_sender().await;
+            finish_recording_finalization(finalize_recording_branch(&self.pipeline)).await;
+            self.pipeline
+                .lock()
+                .expect("processing pipeline lock")
+                .reset();
+            self.state = AudioCaptureState::Failed;
+            return Err(AudioCaptureCoordinatorError::StopFailed);
+        }
         if let Some(mut task) = self.processing_task.take() {
-            if timeout(Duration::from_millis(250), &mut task)
-                .await
-                .is_err()
+            if timeout(
+                remaining_graceful_stop_time(graceful_stop_started_at),
+                &mut task,
+            )
+            .await
+            .is_err()
             {
                 #[cfg(debug_assertions)]
                 eprintln!("audio-capture processing worker aborted reason=stop_timeout");
                 task.abort();
                 let _ = task.await;
+                self.abort_sender_task().await;
+                finish_recording_finalization(finalize_recording_branch(&self.pipeline)).await;
+                self.pipeline
+                    .lock()
+                    .expect("processing pipeline lock")
+                    .reset();
+                self.state = AudioCaptureState::Failed;
+                return Err(AudioCaptureCoordinatorError::GracefulFinishFailed);
             }
         }
-        if let Some(queue) = self.finalized_queue.take() {
-            queue.close();
-            queue.clear();
-        }
-        if let Some(sender_task) = self.sender_task.take() {
-            sender_task.stop().await;
-        }
-        if let Some((writer, failed)) = finalize_recording_branch(&self.pipeline) {
-            if failed {
-                writer.abort(RecordingFailureCode::FinalizationFailed).await;
-            } else {
-                let _ = writer.finalize().await;
-            }
-        }
-        self.pipeline
-            .lock()
-            .expect("processing pipeline lock")
-            .reset();
 
-        if native_stop.is_err() {
-            self.state = AudioCaptureState::Failed;
-            return Err(AudioCaptureCoordinatorError::StopFailed);
+        let processing_failed = self.processing_failed.load(Ordering::Acquire);
+        let final_tail_admission_failed = self.final_tail_admission_failed.load(Ordering::Acquire);
+        if let Some(sender_task) = self.sender_task.take() {
+            let sender_result = if processing_failed && !final_tail_admission_failed {
+                sender_task.abort().await;
+                Err(())
+            } else {
+                sender_task
+                    .finish_gracefully(remaining_graceful_stop_time(graceful_stop_started_at))
+                    .await
+                    .map_err(|_| ())
+            };
+            self.finalized_queue.take();
+            finish_recording_finalization(finalize_recording_branch(&self.pipeline)).await;
+            self.pipeline
+                .lock()
+                .expect("processing pipeline lock")
+                .reset();
+            if sender_result.is_err() || final_tail_admission_failed {
+                self.state = AudioCaptureState::Failed;
+                return Err(AudioCaptureCoordinatorError::GracefulFinishFailed);
+            }
+        } else {
+            self.finalized_queue.take();
+            finish_recording_finalization(finalize_recording_branch(&self.pipeline)).await;
+            self.pipeline
+                .lock()
+                .expect("processing pipeline lock")
+                .reset();
         }
         self.state = AudioCaptureState::Stopped;
         self.status()
+    }
+
+    /// Immediately tears down capture for app exit, cancellation, and terminal
+    /// failure. Unlike [`Self::stop`], it never asks the live chunker to emit a
+    /// final STT tail.
+    pub(crate) async fn abort(&mut self) {
+        self.graceful_stopping.store(false, Ordering::Release);
+        self.stopping.store(true, Ordering::Release);
+        let _ = self.bridge.stop();
+        self.abort_processing_and_sender().await;
+        self.finalized_queue.take();
+        let mut pipeline = self.pipeline.lock().expect("processing pipeline lock");
+        fail_recording_branch(&mut pipeline);
+        pipeline.reset();
+        self.state = AudioCaptureState::Stopped;
+    }
+
+    async fn abort_processing_and_sender(&mut self) {
+        if let Some(task) = self.processing_task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+        self.abort_sender_task().await;
+    }
+
+    async fn abort_sender_task(&mut self) {
+        if let Some(sender_task) = self.sender_task.take() {
+            sender_task.abort().await;
+        }
     }
 
     pub(crate) fn status(&mut self) -> Result<AudioCaptureStatus, AudioCaptureCoordinatorError> {
@@ -497,13 +575,21 @@ impl<B: NativeAudioCaptureBridge> AudioCaptureCoordinator<B> {
     }
 }
 
+fn remaining_graceful_stop_time(started_at: Instant) -> Duration {
+    GRACEFUL_SENDER_DRAIN_TIMEOUT
+        .checked_sub(started_at.elapsed())
+        .unwrap_or(Duration::ZERO)
+}
+
 async fn run_processing_worker(
     mut receiver: mpsc::Receiver<NativeAudioFrame>,
     reorder_mixed_sources: bool,
     pipeline: Arc<Mutex<ProcessingPipeline>>,
     finalized_queue: Arc<FinalizedChunkQueue>,
     processing_failed: Arc<AtomicBool>,
+    final_tail_admission_failed: Arc<AtomicBool>,
     stopping: Arc<AtomicBool>,
+    graceful_stopping: Arc<AtomicBool>,
     sender_failed: Arc<AtomicBool>,
     sender_failure_notify: Arc<Notify>,
     worker_ready: oneshot::Sender<()>,
@@ -570,6 +656,13 @@ async fn run_processing_worker(
                 {
                     report_reorder_metrics(generation, reorder.metrics());
                     exit_guard.set_reason("native_channel_closed");
+                }
+                return;
+            } else if !graceful_stopping.load(Ordering::Acquire) {
+                #[cfg(debug_assertions)]
+                {
+                    report_reorder_metrics(generation, reorder.metrics());
+                    exit_guard.set_reason("aborted");
                 }
                 return;
             } else {
@@ -641,6 +734,22 @@ async fn run_processing_worker(
                     eprintln!("audio-capture processing failed stage={stage}");
                 }
                 finalized_queue.clear();
+                processing_failed.store(true, Ordering::Release);
+                #[cfg(debug_assertions)]
+                exit_guard.set_reason("processing_failed");
+                return;
+            }
+            if let Err(stage) = flush_final_live_chunk(&pipeline, &finalized_queue) {
+                #[cfg(debug_assertions)]
+                {
+                    report_reorder_metrics(generation, reorder.metrics());
+                    eprintln!("audio-capture processing failed stage={stage}");
+                }
+                if matches!(stage, ProcessingFailureStage::FinalTailQueueFull) {
+                    final_tail_admission_failed.store(true, Ordering::Release);
+                } else {
+                    finalized_queue.clear();
+                }
                 processing_failed.store(true, Ordering::Release);
                 #[cfg(debug_assertions)]
                 exit_guard.set_reason("processing_failed");
@@ -782,6 +891,32 @@ fn flush_processing_pipeline(
         #[cfg(debug_assertions)]
         true,
     )
+}
+
+/// Finalizes the live rolling stream after all native/reordered/mixed frames
+/// have entered it. Recording finalization intentionally remains separate.
+fn flush_final_live_chunk(
+    pipeline: &Arc<Mutex<ProcessingPipeline>>,
+    finalized_queue: &Arc<FinalizedChunkQueue>,
+) -> Result<(), ProcessingFailureStage> {
+    let mut pipeline = pipeline.lock().expect("processing pipeline lock");
+    let Some(chunk) = pipeline.chunker.flush_final() else {
+        return Ok(());
+    };
+    let encoded = encode_audio_chunk(chunk).map_err(|_| ProcessingFailureStage::WavEncode)?;
+    #[cfg(debug_assertions)]
+    eprintln!(
+        "audio-capture final live chunk finalized sequence={}",
+        encoded.sequence
+    );
+    match finalized_queue.push(encoded) {
+        Ok(()) => Ok(()),
+        Err(FinalizedChunkQueueError::Full) => {
+            pipeline.submission_gap = true;
+            Err(ProcessingFailureStage::FinalTailQueueFull)
+        }
+        Err(FinalizedChunkQueueError::Closed) => Err(ProcessingFailureStage::SenderQueueClosed),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -928,6 +1063,7 @@ enum ProcessingFailureStage {
     ChunkerTimelineRegression,
     WavEncode,
     SenderQueueClosed,
+    FinalTailQueueFull,
 }
 
 impl From<AudioChunkerError> for ProcessingFailureStage {
@@ -959,6 +1095,7 @@ impl std::fmt::Display for ProcessingFailureStage {
             Self::ChunkerTimelineRegression => "chunker_timeline_regression",
             Self::WavEncode => "wav_encode",
             Self::SenderQueueClosed => "sender_queue_closed",
+            Self::FinalTailQueueFull => "final_tail_queue_full",
         };
         formatter.write_str(stage)
     }
@@ -1047,6 +1184,18 @@ fn finalize_recording_branch(
     Some((branch.writer, failed))
 }
 
+async fn finish_recording_finalization(
+    finalization: Option<(Arc<dyn RecordingSegmentWriter>, bool)>,
+) {
+    if let Some((writer, failed)) = finalization {
+        if failed {
+            writer.abort(RecordingFailureCode::FinalizationFailed).await;
+        } else {
+            let _ = writer.finalize().await;
+        }
+    }
+}
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub(crate) enum AudioCaptureCoordinatorError {
     #[error("Audio capture is already starting or active.")]
@@ -1055,6 +1204,8 @@ pub(crate) enum AudioCaptureCoordinatorError {
     StartFailed,
     #[error("Audio capture could not be stopped.")]
     StopFailed,
+    #[error("Audio capture could not finish pending transcription.")]
+    GracefulFinishFailed,
     #[error("Audio capture is not active.")]
     NotCapturing,
     #[error("Audio processing failed.")]
@@ -1094,6 +1245,7 @@ mod tests {
                 NativeAudioCaptureBridge, NativeAudioCaptureBridgeError, NativeAudioFrameSender,
             },
             chunker::CHUNK_SAMPLES,
+            mixer::MixedAudioFrame,
             recording_writer::{
                 EncodedRecordingSegment, RecordingFailureCode, RecordingFuture,
                 RecordingSegmentWriter, RecordingWriterError,
@@ -1327,7 +1479,9 @@ mod tests {
             Arc::new(Mutex::new(super::ProcessingPipeline::default())),
             FinalizedChunkQueue::new(),
             Arc::clone(&processing_failed),
+            Arc::new(AtomicBool::new(false)),
             stopping,
+            Arc::new(AtomicBool::new(false)),
             sender_failed,
             Arc::new(Notify::new()),
             ready_sender,
@@ -1496,7 +1650,9 @@ mod tests {
             Arc::new(Mutex::new(ProcessingPipeline::default())),
             Arc::clone(&queue),
             Arc::clone(&processing_failed),
+            Arc::new(AtomicBool::new(false)),
             Arc::clone(&stopping),
+            Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
             Arc::new(Notify::new()),
             ready_sender,
@@ -1633,6 +1789,8 @@ mod tests {
             .expect("fake bridge lock")
             .as_ref()
             .expect("worker sender")
+            // The stateful test resampler retains one boundary input sample,
+            // so this produces exactly one canonical 64k-sample live window.
             .try_send(native_frame(CHUNK_SAMPLES + 1))
             .expect("callback stays non-blocking");
 
@@ -1651,11 +1809,142 @@ mod tests {
         })
         .await
         .expect("worker submits one finalized chunk");
+        sender
+            .lock()
+            .expect("fake bridge lock")
+            .as_ref()
+            .expect("worker sender")
+            .try_send(native_frame_at(2, (CHUNK_SAMPLES + 1) as f64 / 16_000.0))
+            .expect("callback stays non-blocking");
         assert_eq!(
             coordinator.status().expect("status").state(),
             AudioCaptureState::Capturing
         );
         coordinator.stop().await.expect("stops");
+        assert_eq!(
+            *submitted.lock().expect("submitter lock"),
+            vec![0, 1],
+            "normal stop admits the retained overlap plus the newly uncovered tail"
+        );
+    }
+
+    #[tokio::test]
+    async fn graceful_stop_submits_a_short_live_tail_once_before_session_end() {
+        let (bridge, sender) = bridge();
+        let mut coordinator = AudioCaptureCoordinator::new(bridge);
+        let submitted = Arc::new(Mutex::new(Vec::new()));
+        coordinator
+            .start(
+                &system_only_configuration(),
+                Arc::new(RecordingSubmitter {
+                    sequences: Arc::clone(&submitted),
+                }),
+            )
+            .await
+            .expect("starts");
+        sender
+            .lock()
+            .expect("fake bridge lock")
+            .as_ref()
+            .expect("worker sender")
+            .try_send(native_frame(16_000))
+            .expect("callback remains non-blocking");
+
+        coordinator.stop().await.expect("graceful stop");
+        assert_eq!(*submitted.lock().expect("submitter lock"), vec![0]);
+        assert_eq!(
+            coordinator.stop().await.expect("idempotent stop").state(),
+            AudioCaptureState::Stopped
+        );
+        assert_eq!(
+            *submitted.lock().expect("submitter lock"),
+            vec![0],
+            "repeated stop cannot duplicate the final tail"
+        );
+    }
+
+    #[tokio::test]
+    async fn graceful_stop_does_not_add_a_tail_at_an_exact_full_boundary() {
+        let (bridge, sender) = bridge();
+        let mut coordinator = AudioCaptureCoordinator::new(bridge);
+        let submitted = Arc::new(Mutex::new(Vec::new()));
+        coordinator
+            .start(
+                &system_only_configuration(),
+                Arc::new(RecordingSubmitter {
+                    sequences: Arc::clone(&submitted),
+                }),
+            )
+            .await
+            .expect("starts");
+        sender
+            .lock()
+            .expect("fake bridge lock")
+            .as_ref()
+            .expect("worker sender")
+            .try_send(native_frame(CHUNK_SAMPLES + 1))
+            .expect("callback remains non-blocking");
+
+        coordinator.stop().await.expect("graceful stop");
+        assert_eq!(*submitted.lock().expect("submitter lock"), vec![0]);
+    }
+
+    #[tokio::test]
+    async fn abort_never_emits_a_partial_live_tail() {
+        let (bridge, sender) = bridge();
+        let mut coordinator = AudioCaptureCoordinator::new(bridge);
+        let submitted = Arc::new(Mutex::new(Vec::new()));
+        coordinator
+            .start(
+                &system_only_configuration(),
+                Arc::new(RecordingSubmitter {
+                    sequences: Arc::clone(&submitted),
+                }),
+            )
+            .await
+            .expect("starts");
+        sender
+            .lock()
+            .expect("fake bridge lock")
+            .as_ref()
+            .expect("worker sender")
+            .try_send(native_frame(16_000))
+            .expect("callback remains non-blocking");
+
+        coordinator.abort().await;
+        assert!(submitted.lock().expect("submitter lock").is_empty());
+    }
+
+    #[test]
+    fn final_tail_queue_overflow_is_an_explicit_graceful_finish_failure() {
+        let queue = FinalizedChunkQueue::new();
+        for sequence in 0..FINALIZED_CHUNK_QUEUE_CAPACITY as u64 {
+            queue
+                .push(EncodedAudioChunk {
+                    sequence,
+                    capture_started_at_seconds: sequence as f64,
+                    overlap_seconds: 1.0,
+                    wav_payload: vec![0],
+                })
+                .expect("fills bounded queue");
+        }
+        let pipeline = Arc::new(Mutex::new(ProcessingPipeline::default()));
+        {
+            let mut pipeline = pipeline.lock().expect("pipeline lock");
+            let _ = pipeline
+                .chunker
+                .push(MixedAudioFrame {
+                    capture_time_seconds: 0.0,
+                    samples: vec![0.0; CHUNK_SAMPLES + 1],
+                })
+                .expect("valid tail source");
+        }
+
+        assert!(matches!(
+            super::flush_final_live_chunk(&pipeline, &queue),
+            Err(super::ProcessingFailureStage::FinalTailQueueFull)
+        ));
+        assert_eq!(queue.len(), FINALIZED_CHUNK_QUEUE_CAPACITY);
     }
 
     #[tokio::test]

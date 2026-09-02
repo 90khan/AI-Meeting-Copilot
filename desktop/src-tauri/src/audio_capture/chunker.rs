@@ -41,6 +41,13 @@ pub(crate) struct AudioChunker {
     start_time: Option<f64>,
     expected_next_time: Option<f64>,
     sequence: u64,
+    /// Canonical sample offsets within the current contiguous timeline epoch.
+    /// They make the final partial chunk's already-covered overlap explicit,
+    /// rather than inferring coverage from the retained buffer length.
+    pending_start_sample: u64,
+    next_sample: u64,
+    covered_until_sample: u64,
+    has_emitted_full_chunk: bool,
 }
 
 impl Default for AudioChunker {
@@ -50,6 +57,10 @@ impl Default for AudioChunker {
             start_time: None,
             expected_next_time: None,
             sequence: 0,
+            pending_start_sample: 0,
+            next_sample: 0,
+            covered_until_sample: 0,
+            has_emitted_full_chunk: false,
         }
     }
 }
@@ -72,8 +83,7 @@ impl AudioChunker {
                 return Err(AudioChunkerError::TimelineRegression);
             }
             if delta.abs() > GAP_TOLERANCE_SECONDS {
-                self.samples.clear();
-                self.start_time = None;
+                self.clear_pending_timeline();
                 gap_detected = true;
             }
         }
@@ -82,6 +92,9 @@ impl AudioChunker {
         }
         self.expected_next_time =
             Some(frame.capture_time_seconds + frame.samples.len() as f64 * SAMPLE_SECONDS);
+        self.next_sample = self
+            .next_sample
+            .saturating_add(u64::try_from(frame.samples.len()).expect("sample count fits in u64"));
         self.samples.extend(frame.samples);
         Ok(ChunkingResult {
             chunks: self.flush_complete_chunks(),
@@ -100,16 +113,64 @@ impl AudioChunker {
                 overlap_seconds: OVERLAP_SECONDS,
             });
             self.sequence += 1;
+            self.has_emitted_full_chunk = true;
+            self.covered_until_sample = self
+                .covered_until_sample
+                .max(self.pending_start_sample + CHUNK_SAMPLES as u64);
             self.samples.drain(..HOP_SAMPLES);
+            self.pending_start_sample += HOP_SAMPLES as u64;
             self.start_time = Some(timestamp + HOP_SAMPLES as f64 * SAMPLE_SECONDS);
         }
         chunks
     }
+
+    /// Emits the final live-STT request without padding or duplicating fully
+    /// covered audio. After a full rolling chunk, the retained one-second
+    /// overlap is included only when new tail samples exist beyond coverage.
+    pub(crate) fn flush_final(&mut self) -> Option<AudioChunk> {
+        if self.samples.is_empty() || self.next_sample <= self.covered_until_sample {
+            return None;
+        }
+
+        let start_sample = if self.has_emitted_full_chunk {
+            self.pending_start_sample.max(
+                self.covered_until_sample
+                    .saturating_sub(OVERLAP_SAMPLES as u64),
+            )
+        } else {
+            self.pending_start_sample
+        };
+        let start_offset = usize::try_from(start_sample - self.pending_start_sample)
+            .expect("final chunk offset fits in usize");
+        let timestamp = self.start_time.expect("buffer start time is set")
+            + start_offset as f64 * SAMPLE_SECONDS;
+        let samples = self.samples[start_offset..].to_vec();
+        let overlap_samples = self.covered_until_sample.saturating_sub(start_sample);
+        let chunk = AudioChunk {
+            sequence: self.sequence,
+            capture_started_at_seconds: timestamp,
+            samples,
+            overlap_seconds: overlap_samples as f64 * SAMPLE_SECONDS,
+        };
+        self.sequence += 1;
+        self.covered_until_sample = self.next_sample;
+        self.clear_pending_timeline();
+        Some(chunk)
+    }
+
     pub(crate) fn reset(&mut self) {
+        self.clear_pending_timeline();
+        self.sequence = 0;
+    }
+
+    fn clear_pending_timeline(&mut self) {
         self.samples.clear();
         self.start_time = None;
         self.expected_next_time = None;
-        self.sequence = 0;
+        self.pending_start_sample = 0;
+        self.next_sample = 0;
+        self.covered_until_sample = 0;
+        self.has_emitted_full_chunk = false;
     }
 
     #[cfg(debug_assertions)]
@@ -122,7 +183,7 @@ impl AudioChunker {
 mod tests {
     use super::{
         AudioChunker, AudioChunkerError, CHUNK_SAMPLES, HOP_SAMPLES, OVERLAP_SAMPLES,
-        OVERLAP_SECONDS,
+        OVERLAP_SECONDS, SAMPLE_RATE_HZ,
     };
     use crate::audio_capture::mixer::MixedAudioFrame;
     fn frame(time: f64, count: usize, offset: usize) -> MixedAudioFrame {
@@ -184,6 +245,78 @@ mod tests {
                 .chunks[0]
                 .sequence
                 == 0
+        );
+    }
+
+    fn push_duration(chunker: &mut AudioChunker, sample_count: usize) {
+        let mut offset = 0;
+        while offset < sample_count {
+            let count = (sample_count - offset).min(997);
+            let timestamp = offset as f64 / SAMPLE_RATE_HZ as f64;
+            chunker.push(frame(timestamp, count, offset)).expect("push");
+            offset += count;
+        }
+    }
+
+    fn assert_final_tail(total_samples: usize, expected: Option<(usize, usize, f64)>) {
+        let mut chunker = AudioChunker::default();
+        push_duration(&mut chunker, total_samples);
+        let full_chunks = chunker.flush_complete_chunks();
+        assert!(full_chunks.is_empty(), "push drains every full chunk");
+
+        match expected {
+            Some((start, count, overlap_seconds)) => {
+                let final_chunk = chunker.flush_final().expect("final tail");
+                assert_eq!(final_chunk.samples.len(), count);
+                assert_eq!(
+                    final_chunk.samples,
+                    (start..start + count)
+                        .map(|sample| sample as f32)
+                        .collect::<Vec<_>>()
+                );
+                assert_eq!(
+                    final_chunk.capture_started_at_seconds,
+                    start as f64 / SAMPLE_RATE_HZ as f64
+                );
+                assert_eq!(final_chunk.overlap_seconds, overlap_seconds);
+                assert!(chunker.flush_final().is_none(), "final tail is idempotent");
+            }
+            None => assert!(
+                chunker.flush_final().is_none(),
+                "exact coverage has no tail"
+            ),
+        }
+    }
+
+    #[test]
+    fn flush_final_preserves_only_uncovered_live_tail_intervals() {
+        assert_final_tail(SAMPLE_RATE_HZ, Some((0, SAMPLE_RATE_HZ, 0.0)));
+        assert_final_tail(
+            SAMPLE_RATE_HZ * 5 / 2,
+            Some((0, SAMPLE_RATE_HZ * 5 / 2, 0.0)),
+        );
+        assert_final_tail(
+            SAMPLE_RATE_HZ * 39 / 10,
+            Some((0, SAMPLE_RATE_HZ * 39 / 10, 0.0)),
+        );
+        assert_final_tail(CHUNK_SAMPLES, None);
+        assert_final_tail(
+            CHUNK_SAMPLES + 1,
+            Some((HOP_SAMPLES, OVERLAP_SAMPLES + 1, 1.0)),
+        );
+        assert_final_tail(
+            SAMPLE_RATE_HZ * 69 / 10,
+            Some((HOP_SAMPLES, SAMPLE_RATE_HZ * 39 / 10, 1.0)),
+        );
+        assert_final_tail(CHUNK_SAMPLES + HOP_SAMPLES, None);
+        assert_final_tail(SAMPLE_RATE_HZ * 43, None);
+        assert_final_tail(
+            SAMPLE_RATE_HZ * 43 + 1,
+            Some((SAMPLE_RATE_HZ * 42, SAMPLE_RATE_HZ + 1, 1.0)),
+        );
+        assert_final_tail(
+            SAMPLE_RATE_HZ * 45,
+            Some((SAMPLE_RATE_HZ * 42, SAMPLE_RATE_HZ * 3, 1.0)),
         );
     }
 }

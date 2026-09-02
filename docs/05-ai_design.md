@@ -239,6 +239,9 @@ need enough linguistic context. The current desktop live-transcription profile
 uses four-second PCM16 mono chunks with one second of overlap. This deliberately
 adds two seconds of audio acquisition before the first decode in exchange for
 materially better sentence continuity than the previous two-second profile.
+On a normal user-requested capture stop, the desktop flushes the final
+uncovered partial interval through the same bounded FIFO before ending the
+session; application exit and terminal failure remain bounded abort paths.
 
 Long recordings should never wait for completion before processing.
 
